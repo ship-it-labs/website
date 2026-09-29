@@ -37,15 +37,22 @@ create table if not exists public.subscriptions (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null references public.users(id) on delete cascade,
   plan_id text not null,
-  whop_subscription_id text not null unique,
+  whop_membership_id text not null unique,
+  whop_plan_id text,
   status text not null,
-  current_period_start timestamptz,
   current_period_end timestamptz,
   cancel_at_period_end boolean not null default false,
-  created_at timestamptz not null default now()
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now()
 );
 
+-- One active subscription per account; the webhook handler upserts on user_id.
+create unique index if not exists idx_subscriptions_user_unique
+  on public.subscriptions(user_id);
+
 create index if not exists idx_subscriptions_user on public.subscriptions(user_id);
+create index if not exists idx_subscriptions_membership
+  on public.subscriptions(whop_membership_id);
 
 create table if not exists public.entitlements (
   id uuid primary key default gen_random_uuid(),

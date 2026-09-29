@@ -33,6 +33,32 @@ await app.register(multipart, {
   limits: { fileSize: 400 * 1024 * 1024, files: 1 },
 });
 
+// Whop signs the exact bytes it sent. Fastify must hand the webhook route the
+// raw body, because re-serialising parsed JSON produces different bytes and the
+// signature check would fail for every legitimate event.
+app.addContentTypeParser(
+  "application/json",
+  { parseAs: "string" },
+  (req, body, done) => {
+    if (req.url?.startsWith("/api/v1/webhooks/whop")) {
+      try {
+        const parsed = body ? JSON.parse(body as string) : {};
+        (req as unknown as { rawBody: string }).rawBody = body as string;
+        done(null, parsed);
+      } catch (err) {
+        done(err as Error, undefined);
+      }
+      return;
+    }
+
+    try {
+      done(null, body ? JSON.parse(body as string) : {});
+    } catch (err) {
+      done(err as Error, undefined);
+    }
+  }
+);
+
 app.setErrorHandler((err, req, reply) => {
   logger.error({ err, url: req.url }, "Unhandled request error");
   reply.status(err.statusCode || 500).send({

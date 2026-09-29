@@ -1,164 +1,349 @@
+import { WhopClient, WhopEnvironment } from "@whop/sdk";
+import crypto from "node:crypto";
 import { logger } from "../utils/logger.js";
 import { supabase } from "../db/client.js";
-import crypto from "crypto";
 
 const isProduction = process.env.NODE_ENV === "production";
-const WHOP_API_KEY = isProduction
-  ? process.env.WHOP_LIVE_API_KEY
-  : process.env.WHOP_SANDBOX_API_KEY;
-const WHOP_PRODUCT_ID = isProduction
-  ? process.env.WHOP_LIVE_PRODUCT_ID
-  : process.env.WHOP_SANDBOX_PRODUCT_ID;
-const WHOP_WEBHOOK_SECRET = process.env.WHOP_WEBHOOK_SECRET || "";
-const WHOP_API_URL = isProduction
-  ? "https://api.whop.com/api/v1"
-  : "https://api.whop.com/api/v1";
 
-export interface WhopWebhookData {
-  id?: string;
-  status?: string;
-  metadata?: { user_id?: string; plan_id?: string };
-  plan_id?: string;
-  current_period_start?: string;
-  current_period_end?: string;
-  cancel_at_period_end?: boolean;
+/**
+ * Sandbox and production are genuinely different Whop hosts, not the same
+ * endpoint with a test key. The SDK exposes both, so the environment choice is
+ * a single switch rather than two URL strings that can drift apart.
+ */
+const ENVIRONMENT = isProduction
+  ? WhopEnvironment.Production
+  : WhopEnvironment.Sandbox;
+
+const API_VERSION_DATE = process.env.WHOP_API_VERSION_DATE || "2026-07-01";
+
+/**
+ * Read per call so the value reflects the live environment and a missing secret
+ * is caught at verification time rather than at import time.
+ */
+function webhookSecret(): string {
+  return process.env.WHOP_WEBHOOK_SECRET || "";
 }
+
+export class WhopConfigError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WhopConfigError";
+  }
+}
+
+export function whopEnvironmentName(): "production" | "sandbox" {
+  return isProduction ? "production" : "sandbox";
+}
+
+/**
+ * A missing credential for the active environment is a hard failure. Falling
+ * back to the other environment's key would either take real payments in
+ * development or hand out sandbox entitlements in production.
+ */
+export function validateWhopConfig(): void {
+  const key = activeApiKey();
+
+  if (!key) {
+    throw new WhopConfigError(
+      isProduction
+        ? "WHOP_LIVE_API_KEY is required when NODE_ENV=production. Refusing to fall back to the sandbox key."
+        : "WHOP_SANDBOX_API_KEY is required in development. Refusing to fall back to the live key."
+    );
+  }
+
+  if (isProduction && key.trim().length < 10) {
+    throw new WhopConfigError("WHOP_LIVE_API_KEY looks truncated.");
+  }
+}
+
+/** Reads the credential for the active environment, per call. */
+function activeApiKey(): string {
+  return isProduction
+    ? process.env.WHOP_LIVE_API_KEY || ""
+    : process.env.WHOP_SANDBOX_API_KEY || "";
+}
+
+let client: WhopClient | null = null;
+
+export function whopClient(): WhopClient {
+  const key = activeApiKey();
+
+  if (!key) {
+    throw new WhopConfigError(
+      isProduction
+        ? "WHOP_LIVE_API_KEY is required when NODE_ENV=production."
+        : "WHOP_SANDBOX_API_KEY is required in development."
+    );
+  }
+
+  if (!client) {
+    client = new WhopClient({
+      token: key,
+      environment: ENVIRONMENT,
+      apiVersionDate: API_VERSION_DATE,
+      timeoutInSeconds: 30,
+      maxRetries: 2,
+    });
+  }
+  return client;
+}
+
+export interface CheckoutResult {
+  purchaseUrl: string;
+  planId: string;
+}
+
+/**
+ * Creates a checkout for an existing Whop plan. Whop owns pricing, so the
+ * platform's plan ids map to Whop plan ids rather than duplicating amounts.
+ */
+export async function createCheckout(options: {
+  whopPlanId: string;
+  userId: string;
+  planId: string;
+  redirectUrl: string;
+}): Promise<CheckoutResult> {
+  const c = whopClient();
+
+  const checkout = await c.checkoutConfigurations.create({
+    plan_id: options.whopPlanId,
+    metadata: {
+      user_id: options.userId,
+      plan_id: options.planId,
+    },
+    redirect_url: options.redirectUrl,
+  });
+
+  if (!checkout.purchase_url) {
+    throw new Error("Whop did not return a purchase_url for the checkout");
+  }
+
+  return { purchaseUrl: checkout.purchase_url, planId: checkout.plan?.id ?? options.whopPlanId };
+}
+
+export interface WhopMembership {
+  id: string;
+  plan_id: string;
+  status: string;
+  user_id: string | null;
+  metadata: Record<string, unknown>;
+  cancel_at_period_end: boolean;
+  current_period_end: string | null;
+}
+
+export async function retrieveMembership(membershipId: string): Promise<WhopMembership> {
+  const c = whopClient();
+  const membership = await c.memberships.retrieve({ id: membershipId });
+  return membership as unknown as WhopMembership;
+}
+
+export async function listMembershipsForUser(
+  userId: string,
+  statuses?: string[]
+): Promise<WhopMembership[]> {
+  const c = whopClient();
+
+  const page = await c.memberships.list({
+    user_id: userId,
+    ...(statuses ? { status: statuses as never } : {}),
+  });
+
+  return (page.data ?? []) as unknown as WhopMembership[];
+}
+
+/**
+ * Cancels at period end by default so a customer keeps access until they paid
+ * for. Passing cancel_at_period_end false would revoke immediately, which is
+ * rarely what a "cancel my subscription" button should do.
+ */
+export async function cancelMembership(membershipId: string): Promise<void> {
+  const c = whopClient();
+  await c.memberships.cancel({
+    id: membershipId,
+    cancel_at_period_end: true,
+  });
+}
+
+// Whop follows the Standard Webhooks spec.
 
 export interface WhopWebhookEvent {
   id: string;
-  event: string;
-  data: WhopWebhookData;
+  type: string;
+  api_version: string;
+  data: Record<string, unknown>;
 }
 
-export function validateWhopConfig(): void {  if (!WHOP_API_KEY) {
-    throw new Error(
-      isProduction
-        ? "WHOP_LIVE_API_KEY is required in production"
-        : "WHOP_SANDBOX_API_KEY is required in development"
-    );
-  }
-  if (!WHOP_PRODUCT_ID) {
-    throw new Error(
-      isProduction
-        ? "WHOP_LIVE_PRODUCT_ID is required in production"
-        : "WHOP_SANDBOX_PRODUCT_ID is required in development"
-    );
-  }
-}
+const REPLAY_WINDOW_SECONDS = 5 * 60;
 
-export function verifyWhopWebhook(payload: string, signature: string): boolean {
-  if (!WHOP_WEBHOOK_SECRET) return false;
+/**
+ * Verifies a Standard Webhooks signature over `{id}.{timestamp}.{body}` using
+ * HMAC-SHA256 with the base64-decoded secret, then rejects anything outside the
+ * replay window. The raw body must be used: re-serialising the parsed JSON
+ * changes the bytes and the signature will not match.
+ */
+export function verifyWebhookSignature(params: {
+  body: string;
+  webhookId: string;
+  timestamp: string;
+  signature: string;
+  now?: number;
+}): boolean {
+  const secret = webhookSecret();
+  if (!secret) {
+    logger.error("WHOP_WEBHOOK_SECRET is not configured; rejecting webhook");
+    return false;
+  }
+
+  if (!params.webhookId || !params.timestamp || !params.signature) {
+    return false;
+  }
+
+  const timestampSeconds = Number(params.timestamp);
+  if (!Number.isFinite(timestampSeconds)) {
+    return false;
+  }
+
+  const nowSeconds = Math.floor((params.now ?? Date.now()) / 1000);
+  if (Math.abs(nowSeconds - timestampSeconds) > REPLAY_WINDOW_SECONDS) {
+    logger.warn({ timestamp: params.timestamp }, "Rejected webhook outside the replay window");
+    return false;
+  }
+
+  const key = Buffer.from(secret, "base64");
   const expected = crypto
-    .createHmac("sha256", WHOP_WEBHOOK_SECRET)
-    .update(payload)
-    .digest("hex");
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
-}
+    .createHmac("sha256", key)
+    .update(`${params.webhookId}.${params.timestamp}.${params.body}`)
+    .digest("base64");
 
-export async function createWhopCheckout(
-  userId: string,
-  planId: string,
-  successUrl: string
-): Promise<{ checkoutUrl: string }> {
-  validateWhopConfig();
+  // The header carries one or more space separated `v1,<signature>` pairs.
+  const candidates = params.signature
+    .split(" ")
+    .map((part) => part.split(",")[1])
+    .filter((value): value is string => Boolean(value));
 
-  const resp = await fetch(`${WHOP_API_URL}/checkouts`, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${WHOP_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      product_id: WHOP_PRODUCT_ID,
-      metadata: { user_id: userId, plan_id: planId },
-      redirect_url: successUrl,
-    }),
-  });
-
-  if (!resp.ok) {
-    const text = await resp.text();
-    logger.error({ status: resp.status, text }, "Whop checkout creation failed");
-    throw new Error("Failed to create checkout");
+  if (candidates.length === 0) {
+    return false;
   }
 
-  const data = (await resp.json()) as { data?: { url?: string }; url?: string };
-  const checkoutUrl = data.data?.url ?? data.url;
-  if (!checkoutUrl) {
-    throw new Error("Whop did not return a checkout URL");
-  }
-  return { checkoutUrl };
-}
-
-export async function getWhopSubscription(subscriptionId: string): Promise<unknown> {
-  const resp = await fetch(`${WHOP_API_URL}/subscriptions/${subscriptionId}`, {
-    headers: { Authorization: `Bearer ${WHOP_API_KEY}` },
+  const expectedBuf = Buffer.from(expected);
+  return candidates.some((candidate) => {
+    const candidateBuf = Buffer.from(candidate);
+    return (
+      candidateBuf.length === expectedBuf.length &&
+      crypto.timingSafeEqual(candidateBuf, expectedBuf)
+    );
   });
-  if (!resp.ok) return null;
-  const data = (await resp.json()) as { data?: unknown };
-  return data.data ?? null;
 }
 
-export async function cancelWhopSubscription(subscriptionId: string): Promise<void> {
-  const resp = await fetch(`${WHOP_API_URL}/subscriptions/${subscriptionId}/cancel`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${WHOP_API_KEY}` },
-  });
-  if (!resp.ok) {
-    logger.error({ subscriptionId, status: resp.status }, "Failed to cancel Whop subscription");
+const PLAN_FOR_STATUS: Record<string, string | null> = {
+  "membership.activated": "active",
+  "membership.deactivated": "free",
+  "membership.cancel_at_period_end_changed": "active",
+  "payment.succeeded": "active",
+  "payment.failed": "past_due",
+  "refund.created": "free",
+};
+
+/**
+ * Maps a Whop membership onto a local plan id. The plan id travels in the
+ * membership metadata that was attached at checkout, so no reverse lookup
+ * against Whop's plan catalogue is needed.
+ */
+function planIdFromMembership(
+  metadata: Record<string, unknown>,
+  fallback: string | null
+): string | null {
+  const fromMetadata = metadata?.plan_id;
+  if (typeof fromMetadata === "string" && fromMetadata.length > 0) {
+    return fromMetadata;
   }
+  return fallback;
 }
 
-export async function handleWhopWebhook(event: WhopWebhookEvent): Promise<void> {
-  const { id, event: eventType, data } = event;
+export interface WebhookOutcome {
+  handled: boolean;
+  duplicate: boolean;
+  userId?: string;
+  planId?: string;
+}
 
-  const { error } = await supabase.from("webhook_events").insert({
+export async function handleWebhookEvent(
+  event: WhopWebhookEvent
+): Promise<WebhookOutcome> {
+  const desiredStatus = PLAN_FOR_STATUS[event.type];
+  if (!desiredStatus) {
+    return { handled: false, duplicate: false };
+  }
+
+  // The unique constraint on idempotency_key makes duplicate delivery a no-op
+  // rather than a double plan change.
+  const { error: insertError } = await supabase.from("webhook_events").insert({
     provider: "whop",
-    event_type: eventType,
-    payload: event,
-    idempotency_key: id,
-    processed: true,
+    event_type: event.type,
+    idempotency_key: event.id,
+    payload: event as unknown as Record<string, unknown>,
+    processed: false,
   });
 
-  if (error) {
-    logger.error({ error, eventId: id }, "Failed to store webhook event");
-    return;
+  if (insertError) {
+    if (insertError.code === "23505") {
+      logger.info({ eventId: event.id, type: event.type }, "Duplicate webhook ignored");
+      return { handled: true, duplicate: true };
+    }
+    logger.error({ err: insertError, eventId: event.id }, "Failed to record webhook");
+    return { handled: false, duplicate: false };
   }
 
-  switch (eventType) {
-    case "subscription.created":
-    case "subscription.updated": {
-      const userId = data?.metadata?.user_id;
-      const planId = data?.metadata?.plan_id || data?.plan_id;
-      if (userId && planId) {
-        await supabase
-          .from("subscriptions")
-          .upsert({
-            user_id: userId,
-            plan_id: planId,
-            whop_subscription_id: data.id,
-            status: data.status,
-            current_period_start: data.current_period_start,
-            current_period_end: data.current_period_end,
-            cancel_at_period_end: data.cancel_at_period_end || false,
-          });
-        await supabase
-          .from("users")
-          .update({ plan_id: planId })
-          .eq("id", userId);
-      }
-      break;
-    }
-    case "subscription.canceled": {
-      const userId = data?.metadata?.user_id;
-      if (userId) {
-        await supabase
-          .from("subscriptions")
-          .update({ status: "canceled" })
-          .eq("whop_subscription_id", data.id);
-      }
-      break;
-    }
+  const membership = event.data as unknown as WhopMembership;
+  const userId =
+    (typeof membership.metadata?.user_id === "string" ? membership.metadata.user_id : undefined) ??
+    (typeof membership.user_id === "string" ? membership.user_id : undefined);
+
+  if (!userId) {
+    logger.warn({ eventId: event.id }, "Webhook carried no user id; nothing to update");
+    await supabase
+      .from("webhook_events")
+      .update({ processed: true })
+      .eq("idempotency_key", event.id);
+    return { handled: false, duplicate: false };
   }
 
-  logger.info({ eventType, eventId: id }, "Whop webhook processed");
+  const planId = planIdFromMembership(membership.metadata, desiredStatus === "free" ? "free" : null);
+
+  const now = new Date().toISOString();
+  const status =
+    desiredStatus === "active"
+      ? (membership.cancel_at_period_end ? "canceled" : "active")
+      : desiredStatus;
+
+  await supabase.from("subscriptions").upsert(
+    {
+      user_id: userId,
+      plan_id: planId ?? "free",
+      whop_membership_id: membership.id,
+      whop_plan_id: membership.plan_id,
+      status,
+      current_period_end: membership.current_period_end,
+      cancel_at_period_end: membership.cancel_at_period_end ?? false,
+      updated_at: now,
+    },
+    { onConflict: "user_id" }
+  );
+
+  await supabase
+    .from("users")
+    .update({ plan_id: planId ?? "free" })
+    .eq("id", userId);
+
+  await supabase
+    .from("webhook_events")
+    .update({ processed: true })
+    .eq("idempotency_key", event.id);
+
+  logger.info(
+    { eventId: event.id, type: event.type, userId, planId, status },
+    "Whop webhook processed"
+  );
+
+  return { handled: true, duplicate: false, userId, planId: planId ?? "free" };
 }
