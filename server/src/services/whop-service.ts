@@ -1,7 +1,7 @@
 import { WhopClient, WhopEnvironment } from "@whop/sdk";
 import crypto from "node:crypto";
 import { logger } from "../utils/logger.js";
-import { supabase } from "../db/client.js";
+import { supabase } from "../db/index.js";
 
 const isProduction = process.env.NODE_ENV === "production";
 

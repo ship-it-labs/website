@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, formatDuration } from "@/lib/api";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  DashboardLayout,
+  Panel,
+  EmptyState,
+} from "@/components/site/DashboardLayout";
+import { cn } from "@/lib/utils";
 
 interface Plan {
   id: string;
@@ -38,7 +42,7 @@ export function BillingPage() {
       setSubscription(s.subscription);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load billing");
+      setError(err instanceof Error ? err.message : "Could not load billing");
     }
   }, []);
 
@@ -55,7 +59,7 @@ export function BillingPage() {
       });
       window.location.href = result.checkout_url;
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to start checkout");
+      setError(err instanceof Error ? err.message : "Could not start checkout");
     } finally {
       setBusy(null);
     }
@@ -68,82 +72,98 @@ export function BillingPage() {
       await api.post("/api/v1/billing/cancel");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to cancel subscription");
+      setError(err instanceof Error ? err.message : "Could not cancel the subscription");
     } finally {
       setBusy(null);
     }
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 p-6">
-      <header>
-        <h1 className="text-2xl font-semibold">Billing</h1>
-        <p className="text-sm text-muted-foreground">Payments are processed by Whop</p>
-      </header>
-
+    <DashboardLayout
+      title="Billing"
+      subtitle="Plans are charged through Whop. Access continues until the end of the paid period."
+    >
       {error && (
-        <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">
+        <p className="mb-8 rounded-xl border border-rose-400/25 bg-rose-500/10 px-5 py-4 text-sm text-rose-200">
           {error}
         </p>
       )}
 
-      {subscription && (
-        <Card>
-          <CardHeader>
-            <CardTitle>Current subscription</CardTitle>
-            <CardDescription>
-              {subscription.status} on {subscription.plan_id}
-              {subscription.cancel_at_period_end ? " (cancels at period end)" : ""}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <p className="text-sm text-muted-foreground">
-              Period ends {new Date(subscription.current_period_end).toLocaleString()}
+      {subscription ? (
+        <Panel
+          title="Current subscription"
+          description={`Status: ${subscription.status} · cancels at period end: ${subscription.cancel_at_period_end ? "yes" : "no"}`}
+          className="mb-8"
+        >
+          <div className="flex items-center justify-between gap-4">
+            <p className="text-sm text-zinc-300">
+              Plan{" "}
+              <span className="font-medium text-white">{subscription.plan_id}</span>
+              {" · renews "}
+              {new Date(subscription.current_period_end).toLocaleString()}
             </p>
             {subscription.status === "active" && (
-              <Button
-                variant="destructive"
-                className="mt-3"
-                disabled={busy === "cancel"}
+              <button
+                type="button"
                 onClick={cancel}
+                disabled={busy === "cancel"}
+                className="rounded-xl border border-rose-400/30 bg-rose-500/10 px-5 py-2.5 text-sm font-medium text-rose-200 transition-colors hover:bg-rose-500/20 disabled:opacity-60"
               >
-                Cancel subscription
-              </Button>
+                {busy === "cancel" ? "Working…" : "Cancel"}
+              </button>
             )}
-          </CardContent>
-        </Card>
+          </div>
+        </Panel>
+      ) : (
+        <p className="mb-8 text-sm text-zinc-500">
+          No active subscription. Pick a plan below.
+        </p>
       )}
 
-      <div className="grid gap-4 md:grid-cols-3">
-        {plans.map((plan) => (
-          <Card key={plan.id}>
-            <CardHeader>
-              <CardTitle>{plan.name}</CardTitle>
-              <CardDescription>
-                {plan.price_cents === 0
-                  ? "Free"
-                  : `$${(plan.price_cents / 100).toFixed(2)} / month`}
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-1 text-sm">
-              <p>{plan.runtime_hours_per_month} runtime hours / month</p>
-              <p>{formatDuration(plan.max_runtime_hours * 3600)} max session</p>
-              <p>{plan.max_ram_mb} MB RAM</p>
-              <p>{plan.cpu} CPU</p>
-              <p>{plan.build_timeout_seconds}s build timeout</p>
-              {plan.price_cents > 0 && (
-                <Button
-                  className="mt-3 w-full"
-                  disabled={busy === plan.id}
-                  onClick={() => checkout(plan.id)}
-                >
-                  {busy === plan.id ? "Redirecting..." : "Subscribe"}
-                </Button>
+      {plans.length === 0 ? (
+        <Panel>
+          <EmptyState>Plans could not be loaded. Try again in a moment.</EmptyState>
+        </Panel>
+      ) : (
+        <div className="grid gap-5 md:grid-cols-3">
+          {plans.map((plan) => (
+            <article
+              key={plan.id}
+              className={cn(
+                "glass h-full rounded-2xl p-7 transition-all duration-300 hover:-translate-y-1",
+                plan.id === "pro" && "border-violet-400/30 glow-violet"
               )}
-            </CardContent>
-          </Card>
-        ))}
-      </div>
-    </div>
+            >
+              <h2 className="text-base font-semibold text-white">{plan.name}</h2>
+              <div className="mt-4 flex items-baseline gap-1">
+                <span className="font-serif text-4xl font-bold tracking-tight text-white">
+                  ${(plan.price_cents / 100).toFixed(0)}
+                </span>
+                <span className="text-sm text-zinc-500">
+                  {plan.price_cents === 0 ? "forever" : "/ month"}
+                </span>
+              </div>
+              <ul className="mt-6 space-y-2.5 text-sm text-zinc-400">
+                <li>{plan.runtime_hours_per_month} runtime hours / month</li>
+                <li>{formatDuration(plan.max_runtime_hours * 3600)} max session</li>
+                <li>{plan.max_ram_mb} MB memory</li>
+                <li>{plan.cpu} CPU</li>
+                <li>{plan.build_timeout_seconds}s build timeout</li>
+              </ul>
+              {plan.price_cents > 0 && (
+                <button
+                  type="button"
+                  onClick={() => checkout(plan.id)}
+                  disabled={busy === plan.id}
+                  className="mt-7 w-full rounded-xl bg-white px-5 py-2.5 text-sm font-medium text-zinc-950 transition-transform duration-200 hover:scale-[1.02] disabled:opacity-60"
+                >
+                  {busy === plan.id ? "Working…" : "Subscribe"}
+                </button>
+              )}
+            </article>
+          ))}
+        </div>
+      )}
+    </DashboardLayout>
   );
 }

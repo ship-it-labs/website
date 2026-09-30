@@ -1,23 +1,31 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth-context";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/input";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  AuthLayout,
+  AuthLink,
+  ErrorNote,
+  Field,
+  GhostButton,
+  PrimaryButton,
+  SuccessNote,
+} from "@/components/site/AuthLayout";
 
 export function LoginPage() {
-  const { signIn, resetPassword, configured } = useAuth();
+  const { signIn, resetPassword } = useAuth();
   const navigate = useNavigate();
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
+    setNotice(null);
     try {
       await signIn(email, password);
       navigate("/dashboard");
@@ -34,59 +42,52 @@ export function LoginPage() {
       return;
     }
     setError(null);
+    setNotice(null);
     try {
       await resetPassword(email);
-      setError(null);
-      alert("Password reset email sent.");
+      setNotice("If that address is registered, a reset link is on its way.");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Reset failed");
+      setError(err instanceof Error ? err.message : "Could not send a reset link");
     }
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center p-4">
-      <Card className="w-full max-w-md">
-        <CardHeader>
-          <CardTitle>Sign in</CardTitle>
-          <CardDescription>Access your runtime dashboard</CardDescription>
-        </CardHeader>
-        <CardContent>
-          {!configured && (
-            <p className="mb-4 rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">
-              Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.
-            </p>
-          )}
-          <form onSubmit={onSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="email">Email</Label>
-              <Input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-              />
-            </div>
-            <div className="space-y-2">
-              <Label htmlFor="password">Password</Label>
-              <Input
-                id="password"
-                type="password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
-            </div>
-            {error && <p className="text-sm text-destructive">{error}</p>}
-            <Button type="submit" className="w-full" disabled={busy}>
-              {busy ? "Signing in..." : "Sign in"}
-            </Button>
-            <Button type="button" variant="ghost" className="w-full" onClick={onReset}>
-              Reset password
-            </Button>
-          </form>
-        </CardContent>
-      </Card>
-    </div>
+    <AuthLayout
+      title="Welcome back"
+      subtitle="Sign in to your runtime dashboard."
+      footer={
+        <>
+          No account yet?{" "}
+          <AuthLink to="/signup">Create one</AuthLink>
+        </>
+      }
+    >
+      <form onSubmit={onSubmit} className="space-y-5">
+        <Field
+          id="email"
+          label="Email"
+          type="email"
+          value={email}
+          onChange={setEmail}
+          placeholder="you@example.com"
+          autoComplete="email"
+        />
+        <Field
+          id="password"
+          label="Password"
+          type="password"
+          value={password}
+          onChange={setPassword}
+          placeholder="••••••••"
+          autoComplete="current-password"
+        />
+
+        {error && <ErrorNote>{error}</ErrorNote>}
+        {notice && <SuccessNote>{notice}</SuccessNote>}
+
+        <PrimaryButton busy={busy}>Sign in</PrimaryButton>
+        <GhostButton onClick={onReset}>Send a reset link</GhostButton>
+      </form>
+    </AuthLayout>
   );
 }

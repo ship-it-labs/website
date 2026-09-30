@@ -1,12 +1,23 @@
-import { createContext, useContext, useEffect, useState, type ReactNode } from "react";
-import { supabase } from "@/lib/supabase";
-import { setAccessTokenProvider } from "@/lib/api";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
+import { api, setAccessToken, getAccessToken } from "@/lib/api";
+
+interface AccountUser {
+  id: string;
+  email: string;
+  plan_id?: string;
+}
 
 interface AuthState {
-  userId: string | null;
-  email: string | null;
+  user: AccountUser | null;
   loading: boolean;
-  configured: boolean;
   signUp: (email: string, password: string) => Promise<{ apiKey: string }>;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
@@ -15,79 +26,75 @@ interface AuthState {
 
 const AuthContext = createContext<AuthState | null>(null);
 
+interface SignupResponse {
+  user: AccountUser;
+  api_key: string;
+  session: { access_token?: string } | null;
+}
+
+interface LoginResponse {
+  user: AccountUser | null;
+  session: { access_token?: string } | null;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [userId, setUserId] = useState<string | null>(null);
-  const [email, setEmail] = useState<string | null>(null);
+  const [user, setUser] = useState<AccountUser | null>(null);
   const [loading, setLoading] = useState(true);
 
-  setAccessTokenProvider(async () => {
-    if (!supabase) return null;
-    const { data } = await supabase.auth.getSession();
-    return data.session?.access_token ?? null;
-  });
-
+  // Restore the session on load by asking the server who the token belongs to.
   useEffect(() => {
-    if (!supabase) {
+    if (!getAccessToken()) {
       setLoading(false);
       return;
     }
 
-    supabase.auth.getSession().then(({ data }) => {
-      setUserId(data.session?.user?.id ?? null);
-      setEmail(data.session?.user?.email ?? null);
-      setLoading(false);
-    });
-
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, session) => {
-      setUserId(session?.user?.id ?? null);
-      setEmail(session?.user?.email ?? null);
-      setLoading(false);
-    });
-
-    return () => sub.subscription.unsubscribe();
+    api
+      .get<{ user: AccountUser }>("/api/v1/account")
+      .then((result) => setUser(result.user))
+      .catch(() => setAccessToken(null))
+      .finally(() => setLoading(false));
   }, []);
 
-  const value: AuthState = {
-    userId,
-    email,
-    loading,
-    configured: Boolean(supabase),
+  const signUp = useCallback(async (email: string, password: string) => {
+    const result = await api.post<SignupResponse>("/api/v1/auth/signup", {
+      email,
+      password,
+    });
 
-    async signUp(mail, password) {
-      if (!supabase) throw new Error("Supabase is not configured");
+    if (result.session?.access_token) {
+      setAccessToken(result.session.access_token);
+    }
+    setUser(result.user);
 
-      const { data, error } = await supabase.auth.signUp({ email: mail, password });
-      if (error) throw new Error(error.message);
-      if (!data.user) throw new Error("Signup did not return a user");
+    return { apiKey: result.api_key };
+  }, []);
 
-      const { data: created, error: createError } = await supabase
-        .from("users")
-        .insert({ id: data.user.id, email: mail, plan_id: "free" });
+  const signIn = useCallback(async (email: string, password: string) => {
+    const result = await api.post<LoginResponse>("/api/v1/auth/login", { email, password });
 
-      if (createError && !createError.message.includes("duplicate")) {
-        console.warn("Could not create profile row:", createError.message);
-      }
+    const token = result.session?.access_token;
+    if (token) setAccessToken(token);
+    setUser(result.user);
+  }, []);
 
-      return { apiKey: created ? "" : "" };
-    },
+  const signOut = useCallback(async () => {
+    try {
+      await api.post("/api/v1/auth/logout");
+    } catch {
+      // Clearing the local session is enough if the server call fails.
+    }
+    setAccessToken(null);
+    setUser(null);
+  }, []);
 
-    async signIn(mail, password) {
-      if (!supabase) throw new Error("Supabase is not configured");
-      const { error } = await supabase.auth.signInWithPassword({ email: mail, password });
-      if (error) throw new Error(error.message);
-    },
+  const resetPassword = useCallback(async (email: string) => {
+    await api.post("/api/v1/auth/reset-password", { email });
+  }, []);
 
-    async signOut() {
-      if (!supabase) return;
-      await supabase.auth.signOut();
-    },
-
-    async resetPassword(mail) {
-      if (!supabase) throw new Error("Supabase is not configured");
-      const { error } = await supabase.auth.resetPasswordForEmail(mail);
-      if (error) throw new Error(error.message);
-    },
-  };
+  const value = useMemo<AuthState>(
+    () => ({ user, loading, signUp, signIn, signOut, resetPassword }),
+    [user, loading, signUp, signIn, signOut, resetPassword]
+  );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }

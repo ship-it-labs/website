@@ -8,7 +8,7 @@ import {
   handleWebhookEvent,
   type WhopWebhookEvent,
 } from "../services/whop-service.js";
-import { supabase } from "../db/client.js";
+import { supabase } from "../db/index.js";
 import { getAllPlans } from "../services/plan-service.js";
 import { logger } from "../utils/logger.js";
 

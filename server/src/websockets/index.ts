@@ -1,6 +1,6 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
 import { WebSocket } from "ws";
-import { supabase } from "../db/client.js";
+import { supabase } from "../db/index.js";
 import { hashApiKey } from "../utils/api-key.js";
 import { logger } from "../utils/logger.js";
 

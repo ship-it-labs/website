@@ -1,7 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  DashboardLayout,
+  Panel,
+  EmptyState,
+} from "@/components/site/DashboardLayout";
 
 interface ApiKeyRecord {
   id: string;
@@ -26,7 +29,7 @@ export function ApiKeysPage() {
       setKeys(result.api_keys);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load API keys");
+      setError(err instanceof Error ? err.message : "Could not load the keys");
     }
   }, []);
 
@@ -43,7 +46,7 @@ export function ApiKeysPage() {
       localStorage.setItem("shipit.initial_api_key", result.api_key);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create key");
+      setError(err instanceof Error ? err.message : "Could not create the key");
     } finally {
       setBusy(false);
     }
@@ -53,119 +56,129 @@ export function ApiKeysPage() {
     setError(null);
     try {
       const result = await api.post<{ api_key: string }>(
-        `/api/v1/account/api-keys/${id}/rotate`
+        `/api/v1/account/api-keys/${id}/rotate`,
+        {}
       );
       setRevealed(result.api_key);
       localStorage.setItem("shipit.initial_api_key", result.api_key);
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to rotate key");
+      setError(err instanceof Error ? err.message : "Could not rotate the key");
     }
   }
 
   async function revoke(id: string) {
     setError(null);
     try {
-      await api.post(`/api/v1/account/api-keys/${id}/revoke`);
+      await api.post(`/api/v1/account/api-keys/${id}/revoke`, {});
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to revoke key");
+      setError(err instanceof Error ? err.message : "Could not revoke the key");
     }
   }
 
   return (
-    <div className="mx-auto max-w-4xl space-y-6 p-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">API keys</h1>
-          <p className="text-sm text-muted-foreground">
-            The plugin authenticates with one of these keys
-          </p>
-        </div>
-        <Button onClick={create} disabled={busy}>
-          Create key
-        </Button>
-      </header>
+    <DashboardLayout
+      title="API keys"
+      subtitle="The plugin authenticates with one of these. Show a key once, then lose it forever."
+    >
+      <div className="mb-8 flex items-center justify-between">
+        <p className="text-sm text-zinc-500">
+          Rotate to replace, revoke to retire. Neither can be undone.
+        </p>
+        <button
+          type="button"
+          onClick={create}
+          disabled={busy}
+          className="rounded-xl bg-white px-5 py-2.5 text-sm font-medium text-zinc-950 transition-transform duration-200 hover:scale-[1.02] disabled:opacity-60"
+        >
+          {busy ? "Working…" : "Create key"}
+        </button>
+      </div>
 
       {error && (
-        <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">
+        <p className="mb-8 rounded-xl border border-rose-400/25 bg-rose-500/10 px-5 py-4 text-sm text-rose-200">
           {error}
         </p>
       )}
 
       {revealed && (
-        <Card className="border-primary/40">
-          <CardHeader>
-            <CardTitle>Copy this key now</CardTitle>
-            <CardDescription>
-              It is only ever shown in full at creation. It cannot be retrieved later.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            <code className="block break-all rounded-md bg-muted p-3 font-mono text-sm">
-              {revealed}
-            </code>
-            <div className="flex gap-2">
-              <Button
-                variant="outline"
-                onClick={() => navigator.clipboard?.writeText(revealed)}
-              >
-                Copy
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  localStorage.removeItem("shipit.initial_api_key");
-                  setRevealed(null);
-                }}
-              >
-                Dismiss
-              </Button>
+        <div className="mb-8 rounded-2xl border border-violet-400/30 bg-violet-500/10 p-6">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-medium uppercase tracking-[0.14em] text-violet-200">
+                Copy this key now
+              </p>
+              <p className="mt-1 text-sm text-violet-100">
+                It will never be shown again.
+              </p>
             </div>
-          </CardContent>
-        </Card>
+            <button
+              type="button"
+              onClick={() => navigator.clipboard?.writeText(revealed)}
+              className="rounded-lg border border-violet-400/40 px-3 py-1.5 text-xs text-violet-200 transition-colors hover:bg-violet-500/20"
+            >
+              Copy
+            </button>
+          </div>
+          <code className="mt-4 block break-all rounded-lg border border-violet-400/25 bg-zinc-950/60 p-4 font-mono text-xs text-violet-100">
+            {revealed}
+          </code>
+          <button
+            type="button"
+            onClick={() => {
+              localStorage.removeItem("shipit.initial_api_key");
+              setRevealed(null);
+            }}
+            className="mt-3 text-xs text-zinc-500 transition-colors hover:text-zinc-300"
+          >
+            Dismiss
+          </button>
+        </div>
       )}
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Keys</CardTitle>
-        </CardHeader>
-        <CardContent>
-          {keys.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No keys yet.</p>
-          ) : (
-            <ul className="divide-y">
-              {keys.map((k) => (
-                <li key={k.id} className="flex items-center justify-between py-3">
-                  <div>
-                    <p className="font-medium">{k.name}</p>
-                    <p className="font-mono text-xs text-muted-foreground">
-                      {k.key_prefix}... {k.is_active ? "" : "(revoked)"}
-                    </p>
-                    <p className="text-xs text-muted-foreground">
-                      created {new Date(k.created_at).toLocaleString()} · last used{" "}
-                      {k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "never"}
-                    </p>
-                  </div>
-                  <div className="flex gap-2">
-                    <Button variant="outline" size="sm" onClick={() => rotate(k.id)}>
-                      Rotate
-                    </Button>
-                    <Button
-                      variant="destructive"
-                      size="sm"
-                      disabled={!k.is_active}
-                      onClick={() => revoke(k.id)}
-                    >
-                      Revoke
-                    </Button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-        </CardContent>
-      </Card>
-    </div>
+      <Panel title="Keys">
+        {keys.length === 0 ? (
+          <EmptyState>No keys yet. Create one to give the plugin access.</EmptyState>
+        ) : (
+          <ul className="divide-y divide-white/[0.06]">
+            {keys.map((k) => (
+              <li key={k.id} className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0">
+                <div className="min-w-0">
+                  <p className="truncate text-sm font-medium text-white">
+                    {k.name} {!k.is_active && <span className="text-zinc-500">(revoked)</span>}
+                  </p>
+                  <p className="mt-1 font-mono text-xs text-zinc-500">
+                    {k.key_prefix}…
+                  </p>
+                  <p className="mt-1 text-xs text-zinc-600">
+                    created {new Date(k.created_at).toLocaleString()}
+                    {" · "}
+                    last used {k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "never"}
+                  </p>
+                </div>
+                <div className="flex shrink-0 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => rotate(k.id)}
+                    className="rounded-lg border border-white/10 px-3.5 py-2 text-xs text-zinc-300 transition-colors hover:border-white/20 hover:text-white"
+                  >
+                    Rotate
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!k.is_active}
+                    onClick={() => revoke(k.id)}
+                    className="rounded-lg border border-rose-400/30 bg-rose-500/10 px-3.5 py-2 text-xs text-rose-200 transition-colors hover:bg-rose-500/20 disabled:opacity-40"
+                  >
+                    Revoke
+                  </button>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </Panel>
+    </DashboardLayout>
   );
 }

@@ -1,4 +1,4 @@
-import { supabase } from "../db/client.js";
+import { supabase } from "../db/index.js";
 import { recordRuntimeUsage, getCurrentPeriod } from "./quota-service.js";
 import { logger } from "../utils/logger.js";
 import { Runtime } from "../types/index.js";

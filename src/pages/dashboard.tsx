@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, formatDuration } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import {
+  DashboardLayout,
+  Panel,
+  StatTile,
+  StatusDot,
+  EmptyState,
+} from "@/components/site/DashboardLayout";
 
 interface Usage {
   monthly_runtime_limit_seconds: number;
@@ -16,7 +21,6 @@ interface Usage {
     max_runtime_hours: number;
     max_ram_mb: number;
     cpu: number;
-    build_timeout_seconds: number;
   };
 }
 
@@ -26,8 +30,6 @@ interface Runtime {
   app_url?: string;
   lease_expires_at: string;
   project_id: string;
-  started_at?: string;
-  created_at: string;
 }
 
 interface Build {
@@ -35,15 +37,16 @@ interface Build {
   status: string;
   exit_code: number | null;
   created_at: string;
-  project_id: string;
 }
 
 export function DashboardPage() {
-  const { email, userId } = useAuth();
+  const { user } = useAuth();
   const [usage, setUsage] = useState<Usage | null>(null);
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
   const [builds, setBuilds] = useState<Build[]>([]);
   const [error, setError] = useState<string | null>(null);
+
+  const welcome = new URLSearchParams(window.location.search).has("welcome");
 
   const load = useCallback(async () => {
     try {
@@ -57,147 +60,129 @@ export function DashboardPage() {
       setBuilds(b.builds);
       setError(null);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load dashboard");
+      setError(err instanceof Error ? err.message : "Could not load the dashboard");
     }
   }, []);
 
   useEffect(() => {
     load();
-    const timer = setInterval(load, 10_000);
+    const timer = setInterval(load, 15_000);
     return () => clearInterval(timer);
   }, [load]);
 
-  const activeRuntimes = runtimes.filter((r) => r.status === "running" || r.status === "starting");
+  const active = runtimes.filter(
+    (r) => r.status === "running" || r.status === "starting"
+  );
 
   return (
-    <div className="mx-auto max-w-6xl space-y-6 p-6">
-      <header className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">Dashboard</h1>
-          <p className="text-sm text-muted-foreground">{email}</p>
-        </div>
-        <Button variant="outline" onClick={load}>
-          Refresh
-        </Button>
-      </header>
-
+    <DashboardLayout
+      title={welcome ? "Welcome aboard" : "Overview"}
+      subtitle={
+        welcome
+          ? "Your account is ready. Create an API key, then let the agent build and run something."
+          : "Runtime usage, active sessions and recent builds."
+      }
+    >
       {error && (
-        <p className="rounded-md border border-destructive/40 bg-destructive/10 p-3 text-sm">
+        <p className="mb-8 rounded-xl border border-rose-400/25 bg-rose-500/10 px-5 py-4 text-sm text-rose-200">
           {error}
         </p>
       )}
 
-      <div className="grid gap-4 md:grid-cols-4">
-        <StatCard
-          title="Plan"
-          value={usage?.plan.name ?? "-"}
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatTile
+          label="Plan"
+          value={usage?.plan.name ?? "—"}
           detail={
             usage
-              ? `${usage.plan.runtime_hours_per_month}h/month, max ${usage.plan.max_runtime_hours}h session, ${usage.plan.max_ram_mb}MB, ${usage.plan.cpu} CPU`
-              : ""
+              ? `${usage.plan.max_runtime_hours}h sessions · ${usage.plan.max_ram_mb}MB · ${usage.plan.cpu} CPU`
+              : undefined
           }
         />
-        <StatCard
-          title="Runtime used"
-          value={usage ? formatDuration(usage.runtime_used_seconds) : "-"}
-          detail={usage ? `of ${formatDuration(usage.monthly_runtime_limit_seconds)}` : ""}
+        <StatTile
+          label="Used this month"
+          value={usage ? formatDuration(usage.runtime_used_seconds) : "—"}
+          detail={
+            usage ? `of ${formatDuration(usage.monthly_runtime_limit_seconds)}` : undefined
+          }
         />
-        <StatCard
-          title="Runtime remaining"
-          value={usage ? formatDuration(usage.runtime_remaining_seconds) : "-"}
-          detail={usage ? `max session ${formatDuration(usage.max_session_seconds)}` : ""}
+        <StatTile
+          label="Remaining"
+          value={usage ? formatDuration(usage.runtime_remaining_seconds) : "—"}
+          detail={
+            usage
+              ? `longest session ${formatDuration(usage.max_session_seconds)}`
+              : undefined
+          }
         />
-        <StatCard
-          title="Active runtimes"
-          value={String(activeRuntimes.length)}
-          detail={userId ? `user ${userId.slice(0, 8)}` : ""}
-        />
+        <StatTile label="Active runtimes" value={String(active.length)} />
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Runtimes</CardTitle>
-          <CardDescription>Start and stop are performed by the AI through the plugin</CardDescription>
-        </CardHeader>
-        <CardContent>
+      <div className="mt-8 grid gap-6 lg:grid-cols-2">
+        <Panel title="Runtimes" description="Started and stopped by the agent.">
           {runtimes.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No runtimes yet.</p>
+            <EmptyState>
+              No runtimes yet. Ask the agent to build and run a project.
+            </EmptyState>
           ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b text-left">
-                  <th className="py-2">Runtime</th>
-                  <th className="py-2">Status</th>
-                  <th className="py-2">URL</th>
-                  <th className="py-2">Lease expires</th>
-                </tr>
-              </thead>
-              <tbody>
-                {runtimes.slice(0, 10).map((r) => (
-                  <tr key={r.id} className="border-b last:border-0">
-                    <td className="py-2 font-mono">{r.id}</td>
-                    <td className="py-2">{r.status}</td>
-                    <td className="py-2">
-                      {r.app_url ? (
-                        <a className="text-primary underline" href={r.app_url} target="_blank" rel="noreferrer">
-                          {r.app_url}
+            <ul className="divide-y divide-white/[0.06]">
+              {runtimes.slice(0, 8).map((runtime) => (
+                <li key={runtime.id} className="py-3.5 first:pt-0 last:pb-0">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="min-w-0">
+                      <p className="truncate font-mono text-xs text-zinc-400">
+                        {runtime.id}
+                      </p>
+                      {runtime.app_url ? (
+                        <a
+                          href={runtime.app_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="mt-1 block truncate text-sm text-violet-300 transition-colors hover:text-violet-200"
+                        >
+                          {runtime.app_url}
                         </a>
                       ) : (
-                        "-"
+                        <p className="mt-1 text-sm text-zinc-600">No public URL</p>
                       )}
-                    </td>
-                    <td className="py-2">{new Date(r.lease_expires_at).toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+                    </div>
+                    <StatusDot status={runtime.status} />
+                  </div>
+                </li>
+              ))}
+            </ul>
           )}
-        </CardContent>
-      </Card>
+        </Panel>
 
-      <Card>
-        <CardHeader>
-          <CardTitle>Recent builds</CardTitle>
-        </CardHeader>
-        <CardContent>
+        <Panel title="Recent builds" description="Executed in GitHub Actions.">
           {builds.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No builds yet.</p>
+            <EmptyState>No builds yet.</EmptyState>
           ) : (
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b text-left">
-                  <th className="py-2">Build</th>
-                  <th className="py-2">Status</th>
-                  <th className="py-2">Exit</th>
-                  <th className="py-2">Created</th>
-                </tr>
-              </thead>
-              <tbody>
-                {builds.slice(0, 10).map((b) => (
-                  <tr key={b.id} className="border-b last:border-0">
-                    <td className="py-2 font-mono">{b.id}</td>
-                    <td className="py-2">{b.status}</td>
-                    <td className="py-2">{b.exit_code ?? "-"}</td>
-                    <td className="py-2">{new Date(b.created_at).toLocaleString()}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <ul className="divide-y divide-white/[0.06]">
+              {builds.slice(0, 8).map((build) => (
+                <li
+                  key={build.id}
+                  className="flex items-center justify-between gap-4 py-3.5 first:pt-0 last:pb-0"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate font-mono text-xs text-zinc-400">{build.id}</p>
+                    <p className="mt-1 text-xs text-zinc-600">
+                      {new Date(build.created_at).toLocaleString()}
+                    </p>
+                  </div>
+                  <StatusDot status={build.status} />
+                </li>
+              ))}
+            </ul>
           )}
-        </CardContent>
-      </Card>
-    </div>
-  );
-}
+        </Panel>
+      </div>
 
-function StatCard({ title, value, detail }: { title: string; value: string; detail?: string }) {
-  return (
-    <Card>
-      <CardContent className="p-4">
-        <p className="text-xs uppercase tracking-wide text-muted-foreground">{title}</p>
-        <p className="mt-1 text-2xl font-semibold">{value}</p>
-        {detail && <p className="mt-1 text-xs text-muted-foreground">{detail}</p>}
-      </CardContent>
-    </Card>
+      {user && (
+        <p className="mt-10 text-xs text-zinc-600">
+          Signed in as {user.email}
+        </p>
+      )}
+    </DashboardLayout>
   );
 }

@@ -70,6 +70,7 @@ create table if not exists public.projects (
   user_id uuid not null references public.users(id) on delete cascade,
   name text not null,
   repo_url text,
+  run_command text,
   upload_id text,
   upload_path text,
   upload_url text,

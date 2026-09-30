@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { FastifyInstance } from "fastify";
 import { authenticateApiKey } from "../middleware/auth.js";
-import { supabase } from "../db/client.js";
+import { supabase } from "../db/index.js";
 import { logger } from "../utils/logger.js";
 
 const MAX_UPLOAD_BYTES = 400 * 1024 * 1024;
@@ -14,6 +14,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     const parts = req.parts();
     let projectId: string | null = null;
     let projectName: string | null = null;
+    let runCommand: string | null = null;
     let manifest: { files: string[]; total_bytes: number; excluded: string[] } | null = null;
     let archive: Buffer | null = null;
     let filename: string | null = null;
@@ -42,6 +43,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           const value = String(part.value ?? "");
           if (part.fieldname === "project_id") projectId = value;
           if (part.fieldname === "project_name") projectName = value;
+          if (part.fieldname === "run_command") runCommand = value;
           if (part.fieldname === "manifest") manifest = JSON.parse(value);
         }
       }
@@ -107,6 +109,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
         id: projectId,
         user_id: userId,
         name: projectName || projectId,
+        run_command: runCommand,
         upload_id: uploadId,
         upload_path: storagePath,
         upload_url: signed.signedUrl,

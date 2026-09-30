@@ -1,4 +1,4 @@
-import { supabase } from "../db/client.js";
+import { supabase } from "../db/index.js";
 import { Plan } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 
@@ -42,7 +42,7 @@ export async function seedPlans(): Promise<void> {
   for (const plan of DEFAULT_PLANS) {
     const { error } = await supabase
       .from("plans")
-      .upsert(plan, { onConflict: "id" });
+      .upsert({ ...plan } as Record<string, unknown>, { onConflict: "id" });
     if (error) {
       logger.error({ error, planId: plan.id }, "Failed to seed plan");
     }

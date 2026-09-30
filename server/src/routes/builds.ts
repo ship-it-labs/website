@@ -4,15 +4,27 @@ import { authenticateApiKey } from "../middleware/auth.js";
 import { createBuild, triggerGitHubActionsBuild, getBuild, listBuilds } from "../services/build-service.js";
 import { recordBuild } from "../services/quota-service.js";
 import { isCommandAllowed, firstBlockedCommand } from "../services/command-guard.js";
-import { supabase } from "../db/client.js";
+import { supabase } from "../db/index.js";
 import { logger } from "../utils/logger.js";
 
-const buildSchema = z.object({
-  project_id: z.string().min(1),
-  install_commands: z.array(z.string().min(1)).max(20).default([]),
-  build_commands: z.array(z.string().min(1)).max(20).min(1),
-  test_commands: z.array(z.string().min(1)).max(20).default([]),
-});
+/**
+ * A project does not have to be compiled. Static sites and plain scripts can be
+ * run straight from source, so build_commands is optional, but the request must
+ * still ask for something to happen.
+ */
+const buildSchema = z
+  .object({
+    project_id: z.string().min(1),
+    install_commands: z.array(z.string().min(1)).max(20).default([]),
+    build_commands: z.array(z.string().min(1)).max(20).default([]),
+    test_commands: z.array(z.string().min(1)).max(20).default([]),
+  })
+  .refine(
+    (value) =>
+      value.install_commands.length + value.build_commands.length + value.test_commands.length >
+      0,
+    { message: "Provide at least one install, build or test command" }
+  );
 
 export { isCommandAllowed } from "../services/command-guard.js";
 

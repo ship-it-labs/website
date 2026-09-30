@@ -1,4 +1,5 @@
 import "dotenv/config";
+import crypto from "node:crypto";
 import path from "path";
 import fs from "fs";
 import Fastify from "fastify";
@@ -7,6 +8,7 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import multipart from "@fastify/multipart";
 import { logger } from "./utils/logger.js";
+import { usingSqlite } from "./db/index.js";
 import { authRoutes } from "./routes/auth.js";
 import { apiKeyRoutes } from "./routes/api-keys.js";
 import { buildRoutes } from "./routes/builds.js";
@@ -69,7 +71,9 @@ app.setErrorHandler((err, req, reply) => {
   });
 });
 
-await app.register(authRoutes, { prefix: "/api/v1/auth" });
+// authRoutes defines its own /auth/* paths, so it mounts at the version root to
+// avoid producing /api/v1/auth/auth/*.
+await app.register(authRoutes, { prefix: "/api/v1" });
 await app.register(apiKeyRoutes, { prefix: "/api/v1/account" });
 await app.register(buildRoutes, { prefix: "/api/v1" });
 await app.register(projectRoutes, { prefix: "/api/v1" });
@@ -79,6 +83,53 @@ await app.register(webhookRoutes, { prefix: "/api/v1" });
 await app.register(websocketRoutes);
 
 app.get("/health", async () => ({ status: "ok" }));
+
+/**
+ * Serves objects written by the local SQLite storage driver, so the build
+ * workflow can download an uploaded project exactly as it would from Supabase
+ * Storage. The signature and expiry are checked before anything is read.
+ */
+if (usingSqlite) {
+  app.get<{ Params: { "*": string }; Querystring: { expires?: string; token?: string } }>(
+    "/local-storage/*",
+    async (req, reply) => {
+      const relative = req.params["*"] ?? "";
+      const target = path.resolve(
+        process.env.LOCAL_STORAGE_ROOT || "./.data/storage",
+        relative
+      );
+      const storageRoot = path.resolve(
+        process.env.LOCAL_STORAGE_ROOT || "./.data/storage"
+      );
+
+      if (!target.startsWith(storageRoot)) {
+        return reply.status(400).send({ error: { code: "BAD_PATH", message: "Invalid object path" } });
+      }
+
+      const expires = Number(req.query.expires);
+      if (!Number.isFinite(expires) || expires * 1000 < Date.now()) {
+        return reply.status(403).send({ error: { code: "URL_EXPIRED", message: "Link expired" } });
+      }
+
+      const expected = crypto
+        .createHmac("sha256", process.env.API_KEY_HASH_SECRET ?? "dev")
+        .update(`${relative}:${expires}`)
+        .digest("hex")
+        .slice(0, 32);
+
+      if (req.query.token !== expected) {
+        return reply.status(403).send({ error: { code: "BAD_SIGNATURE", message: "Invalid token" } });
+      }
+
+      if (!fs.existsSync(target)) {
+        return reply.status(404).send({ error: { code: "NOT_FOUND", message: "Object not found" } });
+      }
+
+      reply.header("Content-Type", "application/zip");
+      return reply.send(fs.createReadStream(target));
+    }
+  );
+}
 
 if (fs.existsSync(FRONTEND_DIST)) {
   await app.register(fastifyStatic, { root: FRONTEND_DIST, prefix: "/" });
