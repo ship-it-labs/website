@@ -1,6 +1,7 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { authenticateApiKey } from "../middleware/auth.js";
+import { supabase } from "../db/index.js";
 import { getQuotaStatus } from "../services/quota-service.js";
 import { callOrchestrator } from "../services/orchestrator-client.js";
 import { logger } from "../utils/logger.js";
@@ -8,6 +9,10 @@ import { logger } from "../utils/logger.js";
 const startSchema = z.object({
   project_id: z.string().min(1),
 });
+
+// How long the agent may hold the archive link. The download begins
+    // immediately on start, so this only needs to survive a slow queue.
+const SOURCE_URL_TTL_SECONDS = 15 * 60;
 
 export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authenticateApiKey);
@@ -20,10 +25,51 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    const userId = req.auth!.userId;
+    const projectId = parsed.data.project_id;
+
+    // The project lives in this process's own store, so the start command and
+    // the archive location are resolved here. Previously the orchestrator looked
+    // the command up in a different database entirely and always came back
+    // empty, which left the container with nothing to run.
+    const { data: project, error: projectError } = await supabase
+      .from("projects")
+      .select("id, run_command, upload_path, upload_sha256")
+      .eq("id", projectId)
+      .eq("user_id", userId)
+      .single();
+
+    if (projectError || !project) {
+      return reply.status(404).send({
+        error: { code: "PROJECT_NOT_FOUND", message: "Project not found" },
+      });
+    }
+
+    // A signed link the agent can actually reach: it pulls from inside the
+    // private network, where the public hostname would not resolve.
+    const { data: signed, error: signError } = await supabase.storage
+      .from("project-uploads")
+      .createSignedUrl(project.upload_path!, SOURCE_URL_TTL_SECONDS, {
+        audience: "internal",
+      });
+
+    if (signError || !signed?.signedUrl) {
+      logger.error({ err: signError, projectId }, "Could not sign the project archive");
+      return reply.status(500).send({
+        error: {
+          code: "SOURCE_UNAVAILABLE",
+          message: "The project archive could not be prepared for this runtime.",
+        },
+      });
+    }
+
     try {
       const result = await callOrchestrator<{ runtime: unknown }>("/runtime/start", {
-        user_id: req.auth!.userId,
-        project_id: parsed.data.project_id,
+        user_id: userId,
+        project_id: projectId,
+        run_command: project.run_command ?? "",
+        source_url: signed.signedUrl,
+        source_sha256: project.upload_sha256 ?? "",
         plan: {
           runtime_hours_per_month: req.auth!.plan.runtime_hours_per_month,
           max_runtime_hours: req.auth!.plan.max_runtime_hours,

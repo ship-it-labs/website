@@ -1,11 +1,6 @@
 import { OrchestratorError } from "../routes/runtimes.js";
 import { logger } from "../utils/logger.js";
-
-const ORCHESTRATOR_URL = (
-  process.env.RUNTIME_ORCHESTRATOR_URL || "http://localhost:3003"
-).replace(/\/+$/, "");
-
-const SERVICE_SECRET = process.env.ORCHESTRATOR_SECRET || "";
+import { orchestratorSecret, orchestratorUrl } from "../config/urls.js";
 
 interface OrchestratorResponse<T> {
   status: number;
@@ -21,11 +16,11 @@ export async function callOrchestrator<T>(
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(`${ORCHESTRATOR_URL}${path}`, {
+    const response = await fetch(`${orchestratorUrl()}${path}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-Service-Secret": SERVICE_SECRET,
+        "X-Service-Secret": orchestratorSecret(),
       },
       body: JSON.stringify(payload),
       signal: controller.signal,
@@ -50,7 +45,7 @@ export async function callOrchestrator<T>(
     const message =
       err instanceof Error && err.name === "AbortError"
         ? `Orchestrator request to ${path} timed out`
-        : `Could not reach the runtime orchestrator at ${ORCHESTRATOR_URL}`;
+        : `Could not reach the runtime orchestrator at ${orchestratorUrl()}`;
     logger.error({ err, path }, message);
     throw new OrchestratorError("ORCHESTRATOR_UNREACHABLE", message);
   } finally {

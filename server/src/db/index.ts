@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { SqliteClient } from "./sqlite/client.js";
+import { publicBaseUrl, internalBaseUrl } from "../config/urls.js";
 import { logger } from "../utils/logger.js";
 
 const isProduction = process.env.NODE_ENV === "production";
@@ -28,8 +29,10 @@ export const supabase: Database = isProduction
   : new SqliteClient({
       file: process.env.SQLITE_PATH || "./.data/shipit.db",
       storageRoot: process.env.LOCAL_STORAGE_ROOT || "./.data/storage",
-      publicBaseUrl:
-        process.env.PUBLIC_BASE_URL || `http://127.0.0.1:${process.env.PORT || 3000}`,
+      publicBaseUrl: publicBaseUrl(),
+      // The agent pulls a project's archive over the private network, where the
+      // public hostname does not resolve.
+      internalBaseUrl: internalBaseUrl(),
     });
 
 if (usingSqlite) {

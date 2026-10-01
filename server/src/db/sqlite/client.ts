@@ -36,8 +36,19 @@ export class SqliteClient {
   private readonly db: SqliteDatabase;
   readonly storageRoot: string;
   private readonly publicBaseUrl: string;
+  private readonly internalBaseUrl: string | null;
 
-  constructor(options: { file: string; storageRoot: string; publicBaseUrl: string }) {
+  constructor(options: {
+    file: string;
+    storageRoot: string;
+    publicBaseUrl: string;
+    /**
+     * Address other services in the private network use to reach this one. A
+     * signed URL built for them must not point at a public hostname they cannot
+     * resolve, such as 127.0.0.1 from inside a container.
+     */
+    internalBaseUrl?: string;
+  }) {
     const dir = path.dirname(options.file);
     if (dir && dir !== "." && !fs.existsSync(dir)) {
       fs.mkdirSync(dir, { recursive: true });
@@ -48,6 +59,9 @@ export class SqliteClient {
     this.db.exec("pragma foreign_keys = on");
     this.storageRoot = options.storageRoot;
     this.publicBaseUrl = options.publicBaseUrl.replace(/\/+$/, "");
+    this.internalBaseUrl = options.internalBaseUrl
+      ? options.internalBaseUrl.replace(/\/+$/, "")
+      : null;
 
     this.db.exec(SCHEMA_SQL);
     applyMigrations(this.db);
@@ -226,6 +240,7 @@ export class SqliteClient {
   get storage() {
     const root = this.storageRoot;
     const base = this.publicBaseUrl;
+    const internalBase = this.internalBaseUrl;
 
     return {
       from: (bucket: string) => ({
@@ -252,23 +267,39 @@ export class SqliteClient {
          * served by this same process. The build workflow still verifies the
          * SHA-256 checksum, so the integrity guarantee is unchanged.
          */
+        /**
+         * Signs the path exactly as it appears in the URL, bucket included, so
+         * the local-storage route can verify the request it receives without
+         * having to guess how the caller built it. Signing the object path alone
+         * produced links that were rejected with a bad signature.
+         */
         createSignedUrl: async (
           objectPath: string,
-          ttlSeconds: number
+          ttlSeconds: number,
+          options?: { audience?: "public" | "internal" }
         ): Promise<{ data: { signedUrl: string } | null; error: { message: string } | null }> => {
           const target = path.join(root, bucket, objectPath);
           if (!fs.existsSync(target)) {
             return { data: null, error: { message: "Object not found" } };
           }
+
+          const relative = `${bucket}/${objectPath.replace(/^\/+/, "")}`;
           const expires = Math.floor(Date.now() / 1000) + ttlSeconds;
           const token = crypto
             .createHmac("sha256", process.env.API_KEY_HASH_SECRET ?? "dev")
-            .update(`${objectPath}:${expires}`)
+            .update(`${relative}:${expires}`)
             .digest("hex")
             .slice(0, 32);
+
+          // Services inside the private network fetch through the internal
+          // address. Outside development there is one reachable hostname and the
+          // internal base is unset, so both audiences get the same URL.
+          const audienceBase =
+            options?.audience === "internal" && internalBase ? internalBase : base;
+
           return {
             data: {
-              signedUrl: `${base}/local-storage/${bucket}/${objectPath}?expires=${expires}&token=${token}`,
+              signedUrl: `${audienceBase}/local-storage/${relative}?expires=${expires}&token=${token}`,
             },
             error: null,
           };

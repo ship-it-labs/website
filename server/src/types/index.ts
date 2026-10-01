@@ -27,7 +27,6 @@ export interface Plan {
   cpu: number;
   build_timeout_seconds: number;
   price_cents: number;
-  whop_product_id: string | null;
 }
 
 export interface Subscription {

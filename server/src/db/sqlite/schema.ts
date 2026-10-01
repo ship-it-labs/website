@@ -51,8 +51,7 @@ create table if not exists plans (
   max_ram_mb integer not null default 512,
   cpu real not null default 0.1,
   build_timeout_seconds integer not null default 180,
-  price_cents integer not null default 0,
-  whop_product_id text
+  price_cents integer not null default 0
 );
 
 create table if not exists api_keys (

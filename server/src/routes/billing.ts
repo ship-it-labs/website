@@ -6,6 +6,7 @@ import {
   validateWhopConfig,
   verifyWebhookSignature,
   handleWebhookEvent,
+  whopPlanIdFor,
   type WhopWebhookEvent,
 } from "../services/whop-service.js";
 import { supabase } from "../db/index.js";
@@ -23,7 +24,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
 
     const { data: plan, error } = await supabase
       .from("plans")
-      .select("id, name, whop_product_id, price_cents")
+      .select("id, name, price_cents")
       .eq("id", plan_id)
       .single();
 
@@ -39,8 +40,12 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    if (!plan.whop_product_id) {
-      logger.error({ planId: plan_id }, "Plan has no Whop plan mapping");
+    // Whop owns pricing, so the platform's tiers map to Whop plans held in the
+    // environment rather than storing amounts or ids of its own.
+    const whopPlanId = whopPlanIdFor(plan_id);
+
+    if (!whopPlanId) {
+      logger.error({ planId: plan_id }, "No Whop plan is configured for this tier");
       return reply.status(502).send({
         error: { code: "BILLING_NOT_CONFIGURED", message: "This plan is not available for purchase yet" },
       });
@@ -49,11 +54,11 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
     try {
       validateWhopConfig();
 
+      // Whop returns the checkout link itself; there is no redirect to configure.
       const { purchaseUrl } = await createCheckout({
-        whopPlanId: plan.whop_product_id,
+        whopPlanId,
         userId: req.auth!.userId,
         planId: plan_id,
-        redirectUrl: `${process.env.FRONTEND_URL || "http://localhost:5173"}/dashboard/billing`,
       });
 
       return reply.send({ checkout_url: purchaseUrl });

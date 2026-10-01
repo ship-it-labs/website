@@ -12,11 +12,11 @@ create table if not exists public.plans (
   name text not null,
   runtime_hours_per_month integer not null default 24,
   max_runtime_hours integer not null default 3,
+  max_concurrent_runtimes integer not null default 1,
   max_ram_mb integer not null default 512,
   cpu numeric(4,2) not null default 0.1,
   build_timeout_seconds integer not null default 180,
-  price_cents integer not null default 0,
-  whop_product_id text
+  price_cents integer not null default 0
 );
 
 create table if not exists public.api_keys (

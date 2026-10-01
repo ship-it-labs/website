@@ -11,6 +11,17 @@ import { logger } from "./utils/logger.js";
 import { usingSqlite } from "./db/index.js";
 import { authRoutes } from "./routes/auth.js";
 import { apiKeyRoutes, accountRoutes } from "./routes/api-keys.js";
+import {
+  allowedOrigins,
+  assertUrlsConfigured,
+  publicBaseUrl,
+  siteUrl,
+  whopWebhookUrl,
+  billingReturnUrl,
+} from "./config/urls.js";
+
+// Fail here rather than later, when a customer is handed a link to nowhere.
+assertUrlsConfigured();
 import { buildRoutes } from "./routes/builds.js";
 import { projectRoutes } from "./routes/projects.js";
 import { runtimeRoutes } from "./routes/runtimes.js";
@@ -29,7 +40,13 @@ const app = Fastify({
   trustProxy: true,
 });
 
-await app.register(cors, { origin: true, credentials: true });
+// Only this deployment's own origins may call the API with credentials.
+// `origin: true` reflected whatever asked, which would let any site on the
+// internet make authenticated requests once the platform is on a real domain.
+await app.register(cors, {
+  origin: allowedOrigins(),
+  credentials: true,
+});
 await app.register(websocket);
 await app.register(multipart, {
   limits: { fileSize: 400 * 1024 * 1024, files: 1 },
@@ -152,7 +169,22 @@ startLeaseExpiryWorker();
 
 try {
   await app.listen({ port: PORT, host: HOST });
-  logger.info({ port: PORT, env: process.env.NODE_ENV }, "Control plane started");
+  logger.info(
+    {
+      port: PORT,
+      env: process.env.NODE_ENV,
+      publicUrl: publicBaseUrl(),
+      siteUrl: siteUrl(),
+    },
+    "Control plane started"
+  );
+
+  // Logged at startup because both addresses have to be pasted into a dashboard
+  // somewhere, and finding them by reading the source is a waste of an outage.
+  logger.info(
+    { webhookUrl: whopWebhookUrl(), billingReturnUrl: billingReturnUrl() },
+    "Billing endpoints to configure in Whop"
+  );
 } catch (err) {
   logger.error({ err }, "Failed to start control plane");
   process.exit(1);

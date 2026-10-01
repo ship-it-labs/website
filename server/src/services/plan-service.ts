@@ -19,7 +19,6 @@ const DEFAULT_PLANS: Plan[] = [
     cpu: 0.1,
     build_timeout_seconds: 180,
     price_cents: 0,
-    whop_product_id: null,
   },
   {
     id: "pro",
@@ -31,7 +30,6 @@ const DEFAULT_PLANS: Plan[] = [
     cpu: 0.1,
     build_timeout_seconds: 300,
     price_cents: 499,
-    whop_product_id: null,
   },
   {
     id: "plus",
@@ -43,7 +41,6 @@ const DEFAULT_PLANS: Plan[] = [
     cpu: 0.1,
     build_timeout_seconds: 600,
     price_cents: 999,
-    whop_product_id: null,
   },
   {
     id: "ultra",
@@ -55,7 +52,6 @@ const DEFAULT_PLANS: Plan[] = [
     cpu: 0.1,
     build_timeout_seconds: 600,
     price_cents: 1299,
-    whop_product_id: null,
   },
 ];
 

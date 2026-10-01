@@ -94,14 +94,56 @@ export interface CheckoutResult {
 }
 
 /**
- * Creates a checkout for an existing Whop plan. Whop owns pricing, so the
- * platform's plan ids map to Whop plan ids rather than duplicating amounts.
+ * Resolves a platform tier to the Whop plan that sells it.
+ *
+ * Pricing is owned by Whop, so the platform stores no amounts for paid tiers and
+ * keeps only the mapping. The ids come from the environment rather than the
+ * database so that rotating a plan id is a configuration change, not a data
+ * migration.
+ */
+const PLAN_ID_ENV: Record<string, string> = {
+  pro: "WHOP_PRO_PLAN_ID",
+  plus: "WHOP_PLUS_PLAN_ID",
+  ultra: "WHOP_ULTRA_PLAN_ID",
+};
+
+export function whopPlanIdFor(planId: string): string | null {
+  const envName = PLAN_ID_ENV[planId];
+  if (!envName) return null;
+
+  const value = process.env[envName]?.trim();
+  if (!value) return null;
+
+  // A plan id is prefixed `plan_`. Catching a pasted URL or a key here turns a
+  // silent misconfiguration into an obvious error.
+  if (!value.startsWith("plan_")) {
+    logger.warn(
+      { planId, envName },
+      `${envName} does not look like a Whop plan id (expected a plan_ prefix)`
+    );
+    return null;
+  }
+  return value;
+}
+
+/** Reports which tiers are missing a Whop plan, so misconfiguration is visible. */
+export function unconfiguredPlans(): string[] {
+  return Object.keys(PLAN_ID_ENV).filter((planId) => !whopPlanIdFor(planId));
+}
+
+/**
+ * Creates a checkout for an existing Whop plan and returns the link to send the
+ * customer to.
+ *
+ * No redirect URL is configured. Whop returns a `purchase_url` that the client
+ * opens, and where the customer lands afterwards is decided by our own route
+ * reading the subscription, which keeps the destination in one place instead of
+ * duplicating it into every checkout Whop stores.
  */
 export async function createCheckout(options: {
   whopPlanId: string;
   userId: string;
   planId: string;
-  redirectUrl: string;
 }): Promise<CheckoutResult> {
   const c = whopClient();
 
@@ -111,7 +153,6 @@ export async function createCheckout(options: {
       user_id: options.userId,
       plan_id: options.planId,
     },
-    redirect_url: options.redirectUrl,
   });
 
   if (!checkout.purchase_url) {
