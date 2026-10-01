@@ -27,8 +27,10 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
         plan: {
           runtime_hours_per_month: req.auth!.plan.runtime_hours_per_month,
           max_runtime_hours: req.auth!.plan.max_runtime_hours,
+          max_concurrent_runtimes: req.auth!.plan.max_concurrent_runtimes,
           max_ram_mb: req.auth!.plan.max_ram_mb,
           cpu: Number(req.auth!.plan.cpu),
+          plan_id: req.auth!.plan.id,
         },
       });
 
@@ -43,7 +45,13 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
             ? 403
             : err.code === "RUNTIME_NOT_FOUND"
               ? 404
-              : 502;
+              : // Capacity is temporary rather than a fault, so it stays a 429
+                // and the message is written for the person reading it.
+                err.code === "CAPACITY_EXHAUSTED"
+                ? 429
+                : err.code === "CONCURRENCY_LIMIT_REACHED"
+                  ? 409
+                  : 502;
 
         return reply.status(status).send({
           error: { code: err.code, message: err.message },

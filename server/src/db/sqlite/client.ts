@@ -3,7 +3,7 @@ import { DatabaseSync, type SqliteDatabase } from "./binding.js";
 import fs from "node:fs";
 import path from "node:path";
 import { TableQuery, type QueryResult } from "./query.js";
-import { SCHEMA_SQL, SEED_PLANS_SQL } from "./schema.js";
+import { SCHEMA_SQL, SEED_PLANS_SQL, applyMigrations } from "./schema.js";
 
 export interface LocalAuthUser {
   id: string;
@@ -50,6 +50,7 @@ export class SqliteClient {
     this.publicBaseUrl = options.publicBaseUrl.replace(/\/+$/, "");
 
     this.db.exec(SCHEMA_SQL);
+    applyMigrations(this.db);
     this.db.exec(SEED_PLANS_SQL);
     this.db.exec(AUTH_SCHEMA_SQL);
   }

@@ -5,6 +5,24 @@ import { SCHEMA_SQL, SEED_PLANS_SQL } from "../src/db/sqlite/schema.js";
 
 let db: DatabaseSync;
 
+/**
+ * The seeded plans are the fixture these builder tests share, so their count and
+ * order are derived from the seed rather than hardcoded. Adding a tier then
+ * leaves these tests testing the query builder, which is the point.
+ */
+function seededPlanIds(): string[] {
+  const rows = db.prepare("select id from plans order by price_cents desc").all() as { id: string }[];
+  return rows.map((r) => r.id);
+}
+
+function planCount(): number {
+  return seededPlanIds().length;
+}
+
+function priciestPlanIds(): string[] {
+  return seededPlanIds().slice(0, 2);
+}
+
 function table(name: string) {
   return new TableQuery(db, name);
 }
@@ -37,7 +55,7 @@ describe("sqlite query builder", () => {
   it("selects all rows", async () => {
     const { data, error } = await table("plans").select("*");
     expect(error).toBeNull();
-    expect(data).toHaveLength(3);
+    expect(data).toHaveLength(planCount());
   });
 
   it("filters with eq and returns a single row", async () => {
@@ -62,7 +80,9 @@ describe("sqlite query builder", () => {
       .order("price_cents", { ascending: false })
       .limit(2);
 
-    expect(data?.map((r) => r.id)).toEqual(["plus", "pro"]);
+    // The two most expensive seeded plans, named from the seed so adding or
+    // repricing a tier does not silently break this.
+    expect(data?.map((r) => r.id)).toEqual(priciestPlanIds());
   });
 
   it("inserts a row", async () => {
@@ -204,7 +224,7 @@ describe("sqlite query builder", () => {
     expect(error).not.toBeNull();
 
     const { data } = await table("plans").select("id");
-    expect(data).toHaveLength(3);
+    expect(data).toHaveLength(planCount());
   });
 
   it("enforces the foreign key to users", async () => {

@@ -12,18 +12,22 @@ interface Plan {
   name: string;
   runtime_hours_per_month: number;
   max_runtime_hours: number;
+  max_concurrent_runtimes: number;
   max_ram_mb: number;
   cpu: number;
   build_timeout_seconds: number;
   price_cents: number;
 }
 
+// Shown until /api/v1/plans responds. Mirrors the server's seed so the page
+// never advertises a tier or price the control plane will not honour.
 const FALLBACK: Plan[] = [
   {
     id: "free",
     name: "Free",
     runtime_hours_per_month: 24,
     max_runtime_hours: 3,
+    max_concurrent_runtimes: 1,
     max_ram_mb: 512,
     cpu: 0.1,
     build_timeout_seconds: 180,
@@ -32,22 +36,35 @@ const FALLBACK: Plan[] = [
   {
     id: "pro",
     name: "Pro",
-    runtime_hours_per_month: 100,
+    runtime_hours_per_month: 250,
     max_runtime_hours: 8,
-    max_ram_mb: 2048,
-    cpu: 0.5,
+    max_concurrent_runtimes: 2,
+    max_ram_mb: 512,
+    cpu: 0.1,
     build_timeout_seconds: 300,
-    price_cents: 2900,
+    price_cents: 499,
   },
   {
     id: "plus",
     name: "Plus",
     runtime_hours_per_month: 500,
     max_runtime_hours: 24,
-    max_ram_mb: 8192,
-    cpu: 2,
+    max_concurrent_runtimes: 2,
+    max_ram_mb: 512,
+    cpu: 0.1,
     build_timeout_seconds: 600,
-    price_cents: 9900,
+    price_cents: 999,
+  },
+  {
+    id: "ultra",
+    name: "Ultra",
+    runtime_hours_per_month: 1000,
+    max_runtime_hours: 24,
+    max_concurrent_runtimes: 3,
+    max_ram_mb: 512,
+    cpu: 0.1,
+    build_timeout_seconds: 600,
+    price_cents: 1299,
   },
 ];
 
@@ -121,7 +138,7 @@ export function PricingPage() {
             </div>
           </div>
 
-          <div className="mt-16 grid gap-5 lg:grid-cols-3">
+          <div className="mt-16 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
             {plans.map((plan, i) => {
               const featured = plan.id === "pro";
               const price = monthly
@@ -161,10 +178,28 @@ export function PricingPage() {
                         hint="per month"
                       />
                       <Row label={`Up to ${plan.max_runtime_hours}h per session`} />
-                      <Row label={`${plan.max_ram_mb} MB memory`} />
-                      <Row label={`${plan.cpu} CPU`} />
+                      <Row
+                        label={`${plan.max_concurrent_runtimes} instance${
+                          plan.max_concurrent_runtimes === 1 ? "" : "s"
+                        } at a time`}
+                        hint={
+                          plan.max_concurrent_runtimes > 1 ? "running together" : "concurrently"
+                        }
+                      />
                       <Row label={`${plan.build_timeout_seconds}s build timeout`} />
                       <Row label="Ephemeral sandbox" />
+                      <Row
+                        label={
+                          plan.price_cents === 0
+                            ? "Shared capacity"
+                            : "Reserved capacity"
+                        }
+                        hint={
+                          plan.price_cents === 0
+                            ? "when demand allows"
+                            : "always available"
+                        }
+                      />
                     </ul>
 
                     <Link

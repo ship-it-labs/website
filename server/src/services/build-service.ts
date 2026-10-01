@@ -110,7 +110,7 @@ export async function triggerGitHubActionsBuild(buildId: string): Promise<void> 
     );
 
     if (!resp.ok) {
-      throw new Error(`GitHub API error: ${resp.status}`);
+      throw await githubError(resp);
     }
 
     logger.info({ buildId }, "GitHub Actions build triggered");
@@ -121,6 +121,98 @@ export async function triggerGitHubActionsBuild(buildId: string): Promise<void> 
       .eq("id", buildId);
     throw err;
   }
+}
+
+/**
+ * A dispatch that GitHub refused, carrying a message worth showing. A bare 403
+ * is ambiguous: it can mean the token is wrong, the token lacks Actions write,
+ * or the token's lifetime is longer than the organisation allows.
+ */
+export class GitHubDispatchError extends Error {
+  readonly status: number;
+
+  /**
+   * True when the refusal was transient, meaning the same request would
+   * probably succeed later. The route turns this into a 429 so a caller can
+   * retry rather than treating it as a broken integration.
+   */
+  readonly transient: boolean;
+
+  constructor(status: number, explanation: string, transient = false) {
+    super(`GitHub API error: ${status}`);
+    this.name = "GitHubDispatchError";
+    this.status = status;
+    this.explanation = explanation;
+    this.transient = transient;
+  }
+
+  readonly explanation: string;
+}
+
+/**
+ * Distinguishes a transient refusal from a misconfiguration. 409 means a run is
+ * already in progress, 429 and the rate limit wording mean throttling; a plain
+ * 403 or 404 is a permission or configuration fault and must stay visible.
+ */
+export function isTransientDispatchFailure(status: number, detail: string): boolean {
+  if (status === 409 || status === 429 || status === 503) return true;
+
+  const text = detail.toLowerCase();
+  return (
+    text.includes("rate limit") ||
+    text.includes("secondary rate") ||
+    text.includes("abuse detection") ||
+    text.includes("was submitted too quickly")
+  );
+}
+
+async function githubError(resp: Response): Promise<GitHubDispatchError> {
+  let detail = "";
+  try {
+    const body = (await resp.json()) as { message?: string };
+    detail = body.message ?? "";
+  } catch {
+    detail = "";
+  }
+
+  // GitHub throttles, and a throttled or momentarily conflicting dispatch is
+  // exactly what a transient busy message is for. Anything else keeps GitHub's
+  // own wording, because those are configuration problems a retry cannot fix.
+  if (isTransientDispatchFailure(resp.status, detail)) {
+    return new GitHubDispatchError(resp.status, OVER_CAPACITY_MESSAGE, true);
+  }
+
+  const explanation = detail || `GitHub refused the workflow dispatch with status ${resp.status}.`;
+  return new GitHubDispatchError(resp.status, explanation, false);
+}
+
+/**
+ * Shared wording for anything that means "we are busy, try again", covering both
+ * our own capacity limits and GitHub refusing to take more work right now.
+ */
+export const OVER_CAPACITY_MESSAGE =
+  "We are having heavy demand right now and cannot start another build. " +
+  "Please try again in a few minutes.";
+
+/**
+ * Distinguishes a transient refusal from a misconfiguration. 409 means a run is
+ * already in progress, 429 and the rate limit wording mean throttling; a plain
+ * 403 or 404 is a permission or configuration fault and must stay visible.
+ */
+function isTransient(status: number, detail: string): boolean {
+  if (status === 409 || status === 429 || status === 503) return true;
+
+  const text = detail.toLowerCase();
+  return (
+    text.includes("rate limit") ||
+    text.includes("secondary rate") ||
+    text.includes("abuse detection") ||
+    text.includes("was submitted too quickly")
+  );
+}
+
+function errMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 export async function getBuild(buildId: string): Promise<Build | null> {

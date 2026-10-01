@@ -1,7 +1,13 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { authenticateApiKey } from "../middleware/auth.js";
-import { createBuild, triggerGitHubActionsBuild, getBuild, listBuilds } from "../services/build-service.js";
+import {
+  createBuild,
+  triggerGitHubActionsBuild,
+  getBuild,
+  listBuilds,
+  GitHubDispatchError,
+} from "../services/build-service.js";
 import { recordBuild } from "../services/quota-service.js";
 import { isCommandAllowed, firstBlockedCommand } from "../services/command-guard.js";
 import { supabase } from "../db/index.js";
@@ -74,8 +80,29 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
       await recordBuild(req.auth!.userId);
     } catch (err) {
       logger.error({ err, buildId: build.id }, "Failed to trigger build");
-      return reply.status(502).send({
-        error: { code: "GITHUB_UNAVAILABLE", message: "Failed to trigger build workflow" },
+
+      // GitHub rejects a dispatch for many reasons, and they need different
+      // fixes: a bad token, a missing permission, or a token lifetime the
+      // organisation refuses. Reporting only "GitHub unavailable" sent someone
+      // looking for a network problem that was really a permissions one, so the
+      // upstream reason is passed through.
+      const reason =
+        err instanceof GitHubDispatchError
+          ? err.explanation
+          : err instanceof Error
+            ? err.message
+            : String(err);
+
+      // A throttled or conflicting dispatch is temporary, so it gets a 429 and
+      // the caller knows to retry. A rejected token or missing workflow is a
+      // configuration fault and stays a 502 with GitHub's own wording.
+      const transient = err instanceof GitHubDispatchError && err.transient;
+
+      return reply.status(transient ? 429 : 502).send({
+        error: {
+          code: transient ? "BUILD_CAPACITY" : "BUILD_DISPATCH_FAILED",
+          message: `Could not start the build pipeline: ${reason}`,
+        },
       });
     }
 

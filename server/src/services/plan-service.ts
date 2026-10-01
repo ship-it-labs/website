@@ -2,12 +2,19 @@ import { supabase } from "../db/index.js";
 import { Plan } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 
+/**
+ * Tier limits. Paid tiers are priced on runtime hours and how many instances
+ * can run at once, not on machine size: every tier gets the same 512MB and
+ * 0.1 CPU so a plan upgrade never changes what the app can do, only how long
+ * and how many.
+ */
 const DEFAULT_PLANS: Plan[] = [
   {
     id: "free",
     name: "Free",
     runtime_hours_per_month: 24,
     max_runtime_hours: 3,
+    max_concurrent_runtimes: 1,
     max_ram_mb: 512,
     cpu: 0.1,
     build_timeout_seconds: 180,
@@ -17,12 +24,13 @@ const DEFAULT_PLANS: Plan[] = [
   {
     id: "pro",
     name: "Pro",
-    runtime_hours_per_month: 100,
+    runtime_hours_per_month: 250,
     max_runtime_hours: 8,
-    max_ram_mb: 2048,
-    cpu: 0.5,
+    max_concurrent_runtimes: 2,
+    max_ram_mb: 512,
+    cpu: 0.1,
     build_timeout_seconds: 300,
-    price_cents: 2900,
+    price_cents: 499,
     whop_product_id: null,
   },
   {
@@ -30,10 +38,23 @@ const DEFAULT_PLANS: Plan[] = [
     name: "Plus",
     runtime_hours_per_month: 500,
     max_runtime_hours: 24,
-    max_ram_mb: 8192,
-    cpu: 2,
+    max_concurrent_runtimes: 2,
+    max_ram_mb: 512,
+    cpu: 0.1,
     build_timeout_seconds: 600,
-    price_cents: 9900,
+    price_cents: 999,
+    whop_product_id: null,
+  },
+  {
+    id: "ultra",
+    name: "Ultra",
+    runtime_hours_per_month: 1000,
+    max_runtime_hours: 24,
+    max_concurrent_runtimes: 3,
+    max_ram_mb: 512,
+    cpu: 0.1,
+    build_timeout_seconds: 600,
+    price_cents: 1299,
     whop_product_id: null,
   },
 ];

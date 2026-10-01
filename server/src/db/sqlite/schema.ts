@@ -3,6 +3,37 @@
  * supabase/migrations, minus the parts that only exist inside Supabase
  * (row level security, the auth schema and the storage bucket).
  */
+export interface SqliteDatabase {
+  exec(sql: string): void;
+  prepare(sql: string): {
+    all(...params: unknown[]): unknown[];
+    get(...params: unknown[]): unknown;
+    run(...params: unknown[]): unknown;
+  };
+}
+
+/**
+ * Columns added after a database was first created. `create table if not exists`
+ * is a no-op on an existing table, so a volume created by an older build would
+ * otherwise be missing these and every insert naming them would fail. SQLite has
+ * no `add column if not exists`, so each one is checked first.
+ */
+const ADDED_COLUMNS: { table: string; column: string; definition: string }[] = [
+  { table: "plans", column: "max_concurrent_runtimes", definition: "integer not null default 1" },
+  { table: "projects", column: "run_command", definition: "text" },
+];
+
+/** Brings an existing development database up to the current schema. */
+export function applyMigrations(db: SqliteDatabase): void {
+  for (const { table, column, definition } of ADDED_COLUMNS) {
+    const columns = db.prepare(`pragma table_info(${table})`).all() as { name: string }[];
+    if (columns.length === 0) continue;
+    if (columns.some((c) => c.name === column)) continue;
+
+    db.exec(`alter table ${table} add column ${column} ${definition}`);
+  }
+}
+
 export const SCHEMA_SQL = `
 create table if not exists users (
   id text primary key,
@@ -16,6 +47,7 @@ create table if not exists plans (
   name text not null,
   runtime_hours_per_month integer not null default 24,
   max_runtime_hours integer not null default 3,
+  max_concurrent_runtimes integer not null default 1,
   max_ram_mb integer not null default 512,
   cpu real not null default 0.1,
   build_timeout_seconds integer not null default 180,
@@ -175,9 +207,10 @@ create table if not exists server_agents (
 
 export const SEED_PLANS_SQL = `
 insert or replace into plans
-  (id, name, runtime_hours_per_month, max_runtime_hours, max_ram_mb, cpu, build_timeout_seconds, price_cents)
+  (id, name, runtime_hours_per_month, max_runtime_hours, max_concurrent_runtimes, max_ram_mb, cpu, build_timeout_seconds, price_cents)
 values
-  ('free', 'Free', 24, 3, 512, 0.1, 180, 0),
-  ('pro', 'Pro', 100, 8, 2048, 0.5, 300, 2900),
-  ('plus', 'Plus', 500, 24, 8192, 2.0, 600, 9900);
+  ('free', 'Free', 24, 3, 1, 512, 0.1, 180, 0),
+  ('pro', 'Pro', 250, 8, 2, 512, 0.1, 300, 499),
+  ('plus', 'Plus', 500, 24, 2, 512, 0.1, 600, 999),
+  ('ultra', 'Ultra', 1000, 24, 3, 512, 0.1, 600, 1299);
 `;

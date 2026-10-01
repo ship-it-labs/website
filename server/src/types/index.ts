@@ -21,6 +21,8 @@ export interface Plan {
   name: string;
   runtime_hours_per_month: number;
   max_runtime_hours: number;
+  /** How many instances a single account may have running at the same time. */
+  max_concurrent_runtimes: number;
   max_ram_mb: number;
   cpu: number;
   build_timeout_seconds: number;
