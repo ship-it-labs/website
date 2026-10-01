@@ -3,22 +3,27 @@ import { SiteFooter } from "@/components/site/SiteFooter";
 import { AuroraBackground } from "@/components/site/AuroraBackground";
 import { GlowCta, GhostCta } from "@/components/site/GlowCta";
 import { Reveal } from "@/components/site/Reveal";
+import { HeroTexture } from "@/components/site/HeroTexture";
+import { WrenchIcon, PlayIcon, ShieldIcon } from "@/components/site/FeatureIcon";
 
 const FEATURES = [
   {
     title: "The AI builds it",
     body: "Describe what you want. The agent writes the install and build commands, submits them to a 3-minute isolated pipeline, reads the logs, and fixes what broke. You never touch a CI config.",
     accent: "from-violet-500/25",
+    icon: WrenchIcon,
   },
   {
     title: "It just runs",
     body: "Every successful build starts in an ephemeral sandbox with the full filesystem to itself. Sessions cap at three hours and are torn down with the filesystem when the lease ends.",
     accent: "from-cyan-400/25",
+    icon: PlayIcon,
   },
   {
     title: "You keep control",
     body: "Server-enforced quotas and leases. The agent cannot extend its own session even if asked to, so your allowance is never spent on something you did not start.",
     accent: "from-fuchsia-500/25",
+    icon: ShieldIcon,
   },
 ];
 
@@ -36,7 +41,10 @@ export function HomePage() {
 
       <main>
         <section className="relative px-6 pb-24 pt-36 sm:pt-44">
-          <div className="mx-auto max-w-6xl">
+          {/* Two columns on wide screens so the texture fills the space beside
+              the headline; below that it stacks under the copy. */}
+          <div className="mx-auto grid max-w-6xl items-center gap-14 lg:grid-cols-[minmax(0,1fr)_minmax(0,0.85fr)] lg:gap-12">
+            <div>
             <div
               className="stagger inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-3.5 py-1.5 text-xs text-zinc-400 backdrop-blur-md"
               style={{ "--i": 0 } as React.CSSProperties}
@@ -83,26 +91,42 @@ export function HomePage() {
             >
               24 runtime hours a month on the free plan. No card required.
             </p>
+            </div>
+
+            {/* Decorative only, so it is hidden from assistive technology and
+                collapses away on small screens where it would just push the
+                call to action down. */}
+            <div
+              className="stagger hidden h-[340px] lg:block"
+              style={{ "--i": 2 } as React.CSSProperties}
+            >
+              <HeroTexture />
+            </div>
           </div>
         </section>
 
         <section className="relative px-6 py-20">
           <div className="mx-auto grid max-w-6xl gap-5 md:grid-cols-3">
-            {FEATURES.map((feature, i) => (
-              <Reveal key={feature.title} delay={i * 110}>
-                <article className="glass group h-full rounded-2xl p-7 transition-all duration-300 hover:-translate-y-1 hover:border-white/15">
-                  <div
-                    className={`mb-5 h-9 w-9 rounded-xl bg-gradient-to-br ${feature.accent} to-transparent ring-1 ring-inset ring-white/10`}
-                  />
-                  <h3 className="text-lg font-semibold tracking-tight text-white">
-                    {feature.title}
-                  </h3>
-                  <p className="mt-3 text-[15px] leading-relaxed text-zinc-400">
-                    {feature.body}
-                  </p>
-                </article>
-              </Reveal>
-            ))}
+            {FEATURES.map((feature, i) => {
+              const Icon = feature.icon;
+              return (
+                <Reveal key={feature.title} delay={i * 110}>
+                  <article className="glass group h-full rounded-2xl p-7 transition-all duration-300 hover:-translate-y-1 hover:border-white/15">
+                    <div
+                      className={`mb-5 grid h-9 w-9 place-items-center rounded-xl bg-gradient-to-br ${feature.accent} to-transparent text-white ring-1 ring-inset ring-white/10 transition-transform duration-300 group-hover:scale-105`}
+                    >
+                      <Icon className="h-[18px] w-[18px]" />
+                    </div>
+                    <h3 className="text-lg font-semibold tracking-tight text-white">
+                      {feature.title}
+                    </h3>
+                    <p className="mt-3 text-[15px] leading-relaxed text-zinc-400">
+                      {feature.body}
+                    </p>
+                  </article>
+                </Reveal>
+              );
+            })}
           </div>
         </section>
 

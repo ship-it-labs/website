@@ -193,6 +193,45 @@
   }
 }
 
+/* Slow diagonal drift across the hero texture. The gradient is wider than the
+   element so translating it never exposes an edge. */
+@keyframes texture-drift {
+  0% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(-3%, 2%, 0);
+  }
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+}
+
+/* A soft highlight travelling down the panel, like light moving over glass. */
+@keyframes sheen {
+  0% {
+    transform: translate3d(-120%, 0, 0);
+  }
+  60%,
+  100% {
+    transform: translate3d(220%, 0, 0);
+  }
+}
+
+/* Dots that fade in and back out in sequence, giving the texture a pulse
+   without any element moving far enough to distract from the headline. */
+@keyframes texture-dot {
+  0%,
+  100% {
+    opacity: 0.12;
+    transform: scale(0.9);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.15);
+  }
+}
+
 /* Respect the OS setting: no drifting gradient, no sweeping lines, no reveal
    offsets when someone has asked for less motion. */
 @media (prefers-reduced-motion: reduce) {
