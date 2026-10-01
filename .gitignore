@@ -11,10 +11,18 @@ website/server/dist/
 .env.local
 .env.*.local
 
+# Local development database and uploaded sources
+.data/
+**/.data/
+
 # Logs
 *.log
 npm-debug.log*
+pnpm-debug.log*
 yarn-error.log*
+
+# Local dev helpers, superseded by docker compose
+server/run.cmd
 
 # Editor
 .DS_Store

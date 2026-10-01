@@ -164,6 +164,25 @@ describe("sqlite query builder", () => {
     expect(data?.map((r) => r.id)).toEqual(["r1"]);
   });
 
+  it("returns the inserted row for insert().select().single()", async () => {
+    const { data, error } = await table("builds")
+      .insert({
+        id: "b2",
+        user_id: "u1",
+        project_id: "p1",
+        status: "pending",
+        install_commands: [],
+        build_commands: [],
+        test_commands: ["node --check server.js"],
+      })
+      .select()
+      .single();
+
+    expect(error).toBeNull();
+    expect(data?.id).toBe("b2");
+    expect(data?.status).toBe("pending");
+  });
+
   it("stores json columns as text without breaking the insert", async () => {
     const { error } = await table("builds").insert({
       id: "b1",

@@ -34,9 +34,19 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
 
       return reply.status(202).send(result);
     } catch (err) {
-      if (err instanceof OrchestratorError && err.code === "RUNTIME_QUOTA_EXCEEDED") {
-        return reply.status(403).send({
-          error: { code: "RUNTIME_QUOTA_EXCEEDED", message: "Monthly runtime quota exceeded." },
+      if (err instanceof OrchestratorError) {
+        // Surface the orchestrator's own reason instead of masking everything
+        // as unreachable: quota, capacity and agent failures each need a
+        // different response from the caller.
+        const status =
+          err.code === "RUNTIME_QUOTA_EXCEEDED"
+            ? 403
+            : err.code === "RUNTIME_NOT_FOUND"
+              ? 404
+              : 502;
+
+        return reply.status(status).send({
+          error: { code: err.code, message: err.message },
         });
       }
       logger.error({ err, userId: req.auth!.userId }, "Orchestrator start failed");

@@ -50,6 +50,7 @@ class TableQuery implements PromiseLike<QueryResult> {
   private singleMode = false;
   private conflictTarget: string | null = null;
   private returningColumns: string | null = null;
+  private returning = false;
 
   constructor(
     private readonly db: SqliteDatabase,
@@ -57,6 +58,13 @@ class TableQuery implements PromiseLike<QueryResult> {
   ) {}
 
   select(columns?: string): this {
+    // select() after insert() means "return the inserted rows", mirroring
+    // PostgREST. Any other mode keeps its own behaviour.
+    if (this.mode === "insert") {
+      this.returningColumns = columns ?? "*";
+      this.returning = true;
+      return this;
+    }
     if (this.mode === "select" || this.mode === "delete") {
       this.mode = "select";
       this.returningColumns = columns ?? "*";
@@ -256,7 +264,43 @@ class TableQuery implements PromiseLike<QueryResult> {
       insertOne(row);
     }
 
-    return { data: null, error: null };
+    if (!this.returning) {
+      return { data: null, error: null };
+    }
+
+    // Return the inserted rows in input order, honouring single() and limit().
+    const keys = Object.keys(rows[0] ?? {});
+    const idValues = rows.map((row) => normalise(row[keys[0]]));
+    const placeholders = idValues.map(() => "?").join(", ");
+    const columns =
+      this.returningColumns && this.returningColumns !== "*"
+        ? this.returningColumns
+            .split(",")
+            .map((c) => quoteIdent(c.trim()))
+            .join(", ")
+        : "*";
+
+    const selected = this.db
+      .prepare(
+        `select ${columns} from ${quoteIdent(this.table)} where ${quoteIdent(keys[0])} in (${placeholders})`
+      )
+      .all(...(idValues as never[])) as Record<string, unknown>[];
+
+    const ordered = idValues
+      .map((id) => selected.find((row) => revive(row)[keys[0]] === id))
+      .filter((row): row is Record<string, unknown> => Boolean(row))
+      .map(revive);
+
+    if (this.singleMode) {
+      if (ordered.length === 0) {
+        return { data: null, error: { message: "No rows found", code: "PGRST116" } };
+      }
+      return { data: ordered[0], error: null };
+    }
+
+    const limited =
+      this.limitCount !== null ? ordered.slice(0, this.limitCount) : ordered;
+    return { data: limited, error: null };
   }
 
   private runUpdate(): QueryResult {

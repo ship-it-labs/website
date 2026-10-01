@@ -1,0 +1,8 @@
+packages:
+  - "."
+  - server
+
+# esbuild and the HeroUI utility package need their install scripts.
+allowBuilds:
+  esbuild: true
+  "@heroui/shared-utils": true
