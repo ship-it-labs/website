@@ -10,7 +10,7 @@ import multipart from "@fastify/multipart";
 import { logger } from "./utils/logger.js";
 import { usingSqlite } from "./db/index.js";
 import { authRoutes } from "./routes/auth.js";
-import { apiKeyRoutes } from "./routes/api-keys.js";
+import { apiKeyRoutes, accountRoutes } from "./routes/api-keys.js";
 import { buildRoutes } from "./routes/builds.js";
 import { projectRoutes } from "./routes/projects.js";
 import { runtimeRoutes } from "./routes/runtimes.js";
@@ -74,6 +74,7 @@ app.setErrorHandler((err, req, reply) => {
 // authRoutes defines its own /auth/* paths, so it mounts at the version root to
 // avoid producing /api/v1/auth/auth/*.
 await app.register(authRoutes, { prefix: "/api/v1" });
+await app.register(accountRoutes, { prefix: "/api/v1" });
 await app.register(apiKeyRoutes, { prefix: "/api/v1/account" });
 await app.register(buildRoutes, { prefix: "/api/v1" });
 await app.register(projectRoutes, { prefix: "/api/v1" });

@@ -4,7 +4,12 @@ import { generateApiKey } from "../utils/api-key.js";
 import { authenticateApiKey } from "../middleware/auth.js";
 import { logger } from "../utils/logger.js";
 
-export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
+/**
+ * Registered under /api/v1 on its own. It used to live in apiKeyRoutes, whose
+ * prefix already ended in /account, so it was only reachable at
+ * /api/v1/account/account and a page reload dropped the session.
+ */
+export async function accountRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authenticateApiKey);
 
   // Lets the browser restore a session on reload and confirm the token is live.
@@ -21,6 +26,10 @@ export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
 
     return reply.send({ user: data, plan: req.auth!.plan });
   });
+}
+
+export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
+  app.addHook("preHandler", authenticateApiKey);
 
   app.get("/api-keys", async (req, reply) => {
     const { data, error } = await supabase

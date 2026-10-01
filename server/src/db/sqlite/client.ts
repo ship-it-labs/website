@@ -148,9 +148,8 @@ export class SqliteClient {
 
         const session = this.createSession(id);
         return {
-          data: { user: { id, email } },
+          data: { user: { id, email }, session },
           error: null,
-          session,
         };
       },
 
@@ -170,9 +169,8 @@ export class SqliteClient {
         }
 
         return {
-          data: { user: { id: record.id, email: record.email } },
+          data: { user: { id: record.id, email: record.email }, session: this.createSession(record.id) },
           error: null,
-          session: this.createSession(record.id),
         };
       },
 
