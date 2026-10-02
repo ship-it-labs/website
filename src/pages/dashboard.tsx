@@ -12,6 +12,8 @@ import {
 interface Usage {
   monthly_runtime_limit_seconds: number;
   runtime_used_seconds: number;
+  // The part of the total being spent by a runtime that is up right now.
+  runtime_live_seconds?: number;
   runtime_remaining_seconds: number;
   max_session_seconds: number;
   plan: {
@@ -103,7 +105,15 @@ export function DashboardPage() {
           label="Used this month"
           value={usage ? formatDuration(usage.runtime_used_seconds) : "—"}
           detail={
-            usage ? `of ${formatDuration(usage.monthly_runtime_limit_seconds)}` : undefined
+            usage
+              ? // Say how much of it is still ticking, so a total that moves
+                // every few seconds is not mistaken for a bug.
+                (usage.runtime_live_seconds ?? 0) > 0
+                  ? `of ${formatDuration(usage.monthly_runtime_limit_seconds)} · ${formatDuration(
+                      usage.runtime_live_seconds ?? 0
+                    )} running now`
+                  : `of ${formatDuration(usage.monthly_runtime_limit_seconds)}`
+              : undefined
           }
         />
         <StatTile

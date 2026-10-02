@@ -191,6 +191,15 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
         });
         return reply.send(result);
       } catch (err) {
+        // A rejected request is not an unreachable orchestrator. Collapsing every
+        // failure into 502 reported a bad argument as a dead service, which sent
+        // people looking in the wrong place.
+        if (err instanceof OrchestratorError && isCallerError(err.code)) {
+          return reply.status(400).send({
+            error: { code: err.code, message: err.message },
+          });
+        }
+
         logger.error({ err, runtimeId: id, action }, `Orchestrator ${action} failed`);
         return reply.status(502).send({
           error: { code: "ORCHESTRATOR_UNREACHABLE", message: "Runtime orchestrator unreachable" },
@@ -212,6 +221,7 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
         runtime_used_seconds: number;
         runtime_remaining_seconds: number;
         max_session_seconds: number;
+        runtime_live_seconds: number;
       }>("/usage/snapshot", {
         user_id: req.auth!.userId,
         plan_hours_per_month: plan.runtime_hours_per_month,
@@ -223,6 +233,9 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
         runtime_used_seconds: snapshot.runtime_used_seconds,
         runtime_remaining_seconds: snapshot.runtime_remaining_seconds,
         max_session_seconds: snapshot.max_session_seconds,
+        // Split out so a total that keeps moving can be explained: this is the
+        // part being spent right now rather than time already billed.
+        runtime_live_seconds: snapshot.runtime_live_seconds ?? 0,
         plan,
       });
     } catch (err) {
@@ -240,6 +253,21 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
       plan,
     });
   });
+}
+
+/**
+ * Codes that mean the caller sent something the orchestrator refused, rather
+ * than the orchestrator being unable to answer. These deserve a 400 rather than
+ * a 502, because retrying them unchanged will fail identically.
+ */
+function isCallerError(code: string): boolean {
+  return (
+    code === "INVALID_REQUEST" ||
+    code === "VALIDATION_ERROR" ||
+    code === "INVALID_OPERATION" ||
+    code === "PATH_TRAVERSAL" ||
+    code === "RUNTIME_NOT_FOUND"
+  );
 }
 
 export class OrchestratorError extends Error {
