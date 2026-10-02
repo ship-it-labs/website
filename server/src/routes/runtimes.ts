@@ -200,13 +200,44 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
   }
 
   app.get("/usage", async (req, reply) => {
-    const quota = await getQuotaStatus(req.auth!.userId, req.auth!.plan);
+    const plan = req.auth!.plan;
+
+    // The orchestrator is asked first because it owns the runtime lifecycle and
+    // is the only service that saw the session begin and end. Reading the local
+    // usage table first was how usage stayed at zero: nothing ever wrote a row
+    // there, because the billing happens in the orchestrator's own store.
+    try {
+      const snapshot = await callOrchestrator<{
+        monthly_runtime_limit_seconds: number;
+        runtime_used_seconds: number;
+        runtime_remaining_seconds: number;
+        max_session_seconds: number;
+      }>("/usage/snapshot", {
+        user_id: req.auth!.userId,
+        plan_hours_per_month: plan.runtime_hours_per_month,
+        plan_max_runtime_hours: plan.max_runtime_hours,
+      });
+
+      return reply.send({
+        monthly_runtime_limit_seconds: snapshot.monthly_runtime_limit_seconds,
+        runtime_used_seconds: snapshot.runtime_used_seconds,
+        runtime_remaining_seconds: snapshot.runtime_remaining_seconds,
+        max_session_seconds: snapshot.max_session_seconds,
+        plan,
+      });
+    } catch (err) {
+      // Falling back keeps the dashboard usable if the orchestrator is down;
+      // it just shows the locally accounted number rather than failing outright.
+      logger.warn({ err }, "Orchestrator usage unavailable, falling back to local totals");
+    }
+
+    const quota = await getQuotaStatus(req.auth!.userId, plan);
     return reply.send({
       monthly_runtime_limit_seconds: quota.monthlyLimitSeconds,
       runtime_used_seconds: quota.usedSeconds,
       runtime_remaining_seconds: quota.remainingSeconds,
       max_session_seconds: quota.maxSessionSeconds,
-      plan: req.auth!.plan,
+      plan,
     });
   });
 }

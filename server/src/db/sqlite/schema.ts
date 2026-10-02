@@ -23,6 +23,13 @@ const ADDED_COLUMNS: { table: string; column: string; definition: string }[] = [
   { table: "projects", column: "run_command", definition: "text" },
 ];
 
+/** Columns removed from the schema, dropped from existing databases. */
+const REMOVED_COLUMNS: { table: string; column: string }[] = [
+  // Pricing and the Whop plan that sells each tier now come from the
+  // environment, so the column is dead weight in every select.
+  { table: "plans", column: "whop_product_id" },
+];
+
 /** Brings an existing development database up to the current schema. */
 export function applyMigrations(db: SqliteDatabase): void {
   for (const { table, column, definition } of ADDED_COLUMNS) {
@@ -31,6 +38,16 @@ export function applyMigrations(db: SqliteDatabase): void {
     if (columns.some((c) => c.name === column)) continue;
 
     db.exec(`alter table ${table} add column ${column} ${definition}`);
+  }
+
+  // Columns the platform no longer uses. Left in place they still come back from
+  // `select *` and reach the API, which then disagrees with its own types.
+  for (const { table, column } of REMOVED_COLUMNS) {
+    const columns = db.prepare(`pragma table_info(${table})`).all() as { name: string }[];
+    if (columns.length === 0) continue;
+    if (!columns.some((c) => c.name === column)) continue;
+
+    db.exec(`alter table ${table} drop column ${column}`);
   }
 }
 
