@@ -1,3 +1,9 @@
+-- PRODUCTION BOOTSTRAP: paste this whole file into Supabase Dashboard > SQL Editor and run once.
+-- Idempotent: every statement tolerates re-runs. Order matters (0001 first, 0007 last).
+
+-- ============================================================================
+-- migrations/0001_initial_schema.sql
+-- ============================================================================
 -- OpenCode Runtime Platform - initial schema
 
 create table if not exists public.users (
@@ -255,3 +261,109 @@ values
   ('pro', 'Pro', 100, 8, 2048, 0.5, 300, 2900),
   ('plus', 'Plus', 500, 24, 8192, 2.0, 600, 9900)
 on conflict (id) do nothing;
+;
+-- ============================================================================
+-- migrations/0002_run_command.sql
+-- ============================================================================
+-- Adds the command that starts a built project.
+--
+-- The agent decides this when it uploads the project, because knowing how to
+-- start the app is part of describing it. The server-agent uses it as the
+-- container entrypoint instead of guessing, so a project with an unconventional
+-- start still runs.
+
+alter table public.projects
+  add column if not exists run_command text;
+
+-- Builds no longer require a compile step. A project that only needs its
+-- dependencies installed, or nothing at all, can be run straight from source.
+alter table public.builds
+  alter column build_commands set default '[]'::jsonb;
+;
+-- ============================================================================
+-- migrations/0003_plan_tiers.sql
+-- ============================================================================
+-- Pricing tiers and where they are sold.
+--
+-- Two changes, both because a plan is now described by how many instances may
+-- run at once rather than by machine size, and because the Whop plan that sells
+-- a tier is deployment configuration rather than a row in this table.
+
+-- Concurrent instances allowed per account. Every tier gets the same memory and
+-- CPU, so this is what a paid plan actually buys.
+alter table public.plans
+  add column if not exists max_concurrent_runtimes integer not null default 1;
+
+-- The Whop plan ids moved to the environment (WHOP_PRO_PLAN_ID and so on) so
+-- that rotating one is a config change rather than a data migration.
+alter table public.plans
+  drop column if exists whop_product_id;
+
+insert into public.plans (
+  id, name, runtime_hours_per_month, max_runtime_hours,
+  max_concurrent_runtimes, max_ram_mb, cpu,
+  build_timeout_seconds, price_cents
+)
+values
+  ('free',  'Free',  24,   3,  1, 512, 0.1, 180,    0),
+  ('pro',   'Pro',   250,  8,  2, 512, 0.1, 300,  499),
+  ('plus',  'Plus',  500, 24,  2, 512, 0.1, 600,  999),
+  ('ultra', 'Ultra', 1000, 24, 3, 512, 0.1, 600, 1299)
+on conflict (id) do update set
+  name                    = excluded.name,
+  runtime_hours_per_month = excluded.runtime_hours_per_month,
+  max_runtime_hours       = excluded.max_runtime_hours,
+  max_concurrent_runtimes = excluded.max_concurrent_runtimes,
+  max_ram_mb              = excluded.max_ram_mb,
+  cpu                     = excluded.cpu,
+  build_timeout_seconds   = excluded.build_timeout_seconds,
+  price_cents             = excluded.price_cents;
+;
+-- ============================================================================
+-- migrations/0004_pro_session_hours.sql
+-- ============================================================================
+-- Pro sessions are six hours. The price page always advertised eight, but the
+-- orchestrator's three hour ceiling meant every plan got three hours at most,
+-- so this also repairs the oldest broken promise in the pricing.
+update public.plans
+set max_runtime_hours = 6
+where id = 'pro';
+;
+-- ============================================================================
+-- migrations/0005_api_key_expiry.sql
+-- ============================================================================
+-- Keys can expire. Existing keys keep no deadline and never expire.
+alter table public.api_keys
+  add column if not exists expires_at timestamptz;
+;
+-- ============================================================================
+-- migrations/0006_admin.sql
+-- ============================================================================
+-- Admin identity and account standing. Existing rows default to non-admin and
+-- active; the first signup and the bootstrap address are resolved at request
+-- time, so no backfill can lock anyone out or promote the wrong row.
+alter table public.users
+  add column if not exists is_admin boolean not null default false;
+
+alter table public.users
+  add column if not exists is_active boolean not null default true;
+
+-- Platform kill switches and overrides, edited from the admin panel. A missing
+-- row means the default: signups open, executor automatic.
+create table if not exists public.platform_settings (
+  key text primary key,
+  value jsonb not null default '{}'::jsonb,
+  updated_at timestamptz not null default now()
+);
+;
+-- ============================================================================
+-- migrations/0007_plan_sale.sql
+-- ============================================================================
+-- Sale pricing: a tagline plus the pre-discount price shown crossed out.
+-- Both nullable; a plan without them renders exactly as before.
+alter table public.plans
+  add column if not exists note text;
+
+alter table public.plans
+  add column if not exists previous_price_cents integer;
+;
