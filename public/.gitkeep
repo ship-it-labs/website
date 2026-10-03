@@ -1,0 +1,6 @@
+# Keeps the directory tracked in git. Docker's COPY public/ fails on a fresh
+# clone when the folder does not exist at all, and git ignores empty
+# directories — so without this marker the Render build breaks with
+# "/public": not found while local builds pass. Replace with real assets
+# (favicon, og-image, robots.txt) whenever they exist; this file is harmless
+# alongside them.
