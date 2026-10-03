@@ -289,6 +289,11 @@ const PLAN_FOR_STATUS: Record<string, string | null> = {
  * Maps a Whop membership onto a local plan id. The plan id travels in the
  * membership metadata that was attached at checkout, so no reverse lookup
  * against Whop's plan catalogue is needed.
+ *
+ * Plus no longer exists: memberships created before the kill still carry its
+ * id in metadata, and writing it to the user row would 401 every request once
+ * the row is gone. Ultra is the surviving equivalent, matching the merge the
+ * migration applied to stored rows.
  */
 function planIdFromMembership(
   metadata: Record<string, unknown>,
@@ -296,6 +301,7 @@ function planIdFromMembership(
 ): string | null {
   const fromMetadata = metadata?.plan_id;
   if (typeof fromMetadata === "string" && fromMetadata.length > 0) {
+    if (fromMetadata === "plus") return "ultra";
     return fromMetadata;
   }
   return fallback;
@@ -349,7 +355,13 @@ export async function handleWebhookEvent(
     return { handled: false, duplicate: false };
   }
 
-  const planId = planIdFromMembership(membership.metadata, desiredStatus === "free" ? "free" : null);
+  // A deactivation or refund ends paid access, full stop. Stale metadata still
+  // naming a paid tier must not override that, or an ex-customer keeps paid
+  // limits forever on a dead subscription.
+  const planId =
+    desiredStatus === "free"
+      ? "free"
+      : planIdFromMembership(membership.metadata, null);
 
   const now = new Date().toISOString();
   const status =

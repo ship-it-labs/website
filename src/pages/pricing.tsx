@@ -27,7 +27,7 @@ const FALLBACK: Plan[] = [
   {
     id: "free",
     name: "Free",
-    runtime_hours_per_month: 24,
+    runtime_hours_per_month: 10,
     max_runtime_hours: 3,
     max_concurrent_runtimes: 1,
     max_ram_mb: 512,
@@ -40,33 +40,22 @@ const FALLBACK: Plan[] = [
     name: "Pro",
     runtime_hours_per_month: 250,
     max_runtime_hours: 6,
-    max_concurrent_runtimes: 2,
+    max_concurrent_runtimes: 3,
     max_ram_mb: 512,
     cpu: 0.1,
     build_timeout_seconds: 300,
-    price_cents: 499,
-  },
-  {
-    id: "plus",
-    name: "Plus",
-    runtime_hours_per_month: 500,
-    max_runtime_hours: 24,
-    max_concurrent_runtimes: 2,
-    max_ram_mb: 512,
-    cpu: 0.1,
-    build_timeout_seconds: 600,
-    price_cents: 999,
+    price_cents: 900,
   },
   {
     id: "ultra",
     name: "Ultra",
     runtime_hours_per_month: 1000,
     max_runtime_hours: 24,
-    max_concurrent_runtimes: 3,
+    max_concurrent_runtimes: 5,
     max_ram_mb: 512,
     cpu: 0.1,
     build_timeout_seconds: 600,
-    price_cents: 1299,
+    price_cents: 1900,
   },
 ];
 
@@ -140,7 +129,7 @@ export function PricingPage() {
             </div>
           </div>
 
-            <div className="mt-16 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="mt-16 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
             {plans.map((plan, i) => {
               const featured = plan.id === "pro";
               const price = monthly

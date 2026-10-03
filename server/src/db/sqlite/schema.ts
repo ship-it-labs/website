@@ -272,13 +272,22 @@ export const SEED_PLANS_SQL = `
 insert or ignore into plans
   (id, name, runtime_hours_per_month, max_runtime_hours, max_concurrent_runtimes, max_ram_mb, cpu, build_timeout_seconds, price_cents, note, previous_price_cents)
 values
-  ('free', 'Free', 24, 3, 1, 512, 0.1, 180, 0, null, null),
-  ('pro', 'Pro', 250, 6, 2, 512, 0.1, 300, 499, null, null),
-  ('plus', 'Plus', 500, 24, 2, 512, 0.1, 600, 999, null, null),
-  ('ultra', 'Ultra', 1000, 24, 3, 512, 0.1, 600, 1299, null, null);
+  ('free', 'Free', 10, 3, 1, 512, 0.1, 180, 0, null, null),
+  ('pro', 'Pro', 250, 6, 3, 512, 0.1, 300, 900, null, null),
+  ('ultra', 'Ultra', 1000, 24, 5, 512, 0.1, 600, 1900, null, null);
 
 -- One-time repair: the old seed wrote Pro sessions as 8 hours while the
 -- orchestrator capped everyone at 3. Rows still carrying the stale 8 move to
 -- the intended 6; a row an admin already changed is left alone.
 update plans set max_runtime_hours = 6 where id = 'pro' and max_runtime_hours = 8;
+
+-- Kill Plus, reprice Pro and Ultra, trim Free (mirrors 0008). Plus accounts
+-- merge into Ultra before the row goes, or authentication 401s them for a
+-- plan row that no longer exists.
+update plans set runtime_hours_per_month = 10 where id = 'free';
+update plans set price_cents = 900, max_concurrent_runtimes = 3 where id = 'pro';
+update plans set price_cents = 1900, max_concurrent_runtimes = 5 where id = 'ultra';
+update users set plan_id = 'ultra' where plan_id = 'plus';
+update subscriptions set plan_id = 'ultra' where plan_id = 'plus';
+delete from plans where id = 'plus';
 `;
