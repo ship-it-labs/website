@@ -2,6 +2,8 @@ import { FastifyInstance } from "fastify";
 import { supabase, usingSqlite } from "../db/index.js";
 import { generateApiKey } from "../utils/api-key.js";
 import { seedPlans } from "../services/plan-service.js";
+import { BOOTSTRAP_ADMIN_EMAIL } from "../services/admin.js";
+import { getSetting } from "./admin.js";
 import { logger } from "../utils/logger.js";
 
 interface LocalCredentials {
@@ -19,6 +21,33 @@ async function localSignIn(email: string, password: string): Promise<LocalCreden
   const result = await supabase.auth.signInWithPassword({ email, password });
   const data = result.data as LocalCredentials["data"];
   return { data, error: result.error as LocalCredentials["error"] };
+}
+
+/**
+ * True when a new account should start life as an admin: it is the first row
+ * in the table, or it carries the bootstrap owner's address.
+ *
+ * Read as "is there any row at all" rather than a count, because the local
+ * SQLite stand-in does not implement Supabase's head/count options. Two
+ * simultaneous first signups can still race, but the loser only misses the
+ * flag — the request-time email and order checks in isAdminUser still grant
+ * access, so a wrong denial here is safe and a wrong grant is impossible.
+ */
+async function shouldStartAsAdmin(email: string): Promise<boolean> {
+  if (email.toLowerCase() === BOOTSTRAP_ADMIN_EMAIL.toLowerCase()) return true;
+
+  try {
+    const { data } = await supabase
+      .from("users")
+      .select("id")
+      .limit(1)
+      .single();
+
+    return !data;
+  } catch (err) {
+    logger.warn({ err }, "Admin first-user check failed during signup");
+    return false;
+  }
 }
 
 export async function authRoutes(app: FastifyInstance): Promise<void> {
@@ -49,6 +78,14 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    // The admin panel can close signups. Checked before any credential is
+    // created so a refused signup leaves nothing behind to clean up.
+    if (!(await getSetting<boolean>("signups_enabled", true))) {
+      return reply.status(403).send({
+        error: { code: "SIGNUPS_DISABLED", message: "Signups are currently disabled" },
+      });
+    }
+
     await seedPlans();
 
     // The driver owns credential storage: Supabase Auth in production, the
@@ -74,6 +111,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       id: userId,
       email,
       plan_id: "free",
+      // The first account owns the platform, and the bootstrap address owns it
+      // no matter when it arrives. Either fact alone is enough; the request-time
+      // check in isAdminUser covers databases created before this column existed.
+      is_admin: (await shouldStartAsAdmin(email)) ? true : false,
     });
 
     if (userError) {

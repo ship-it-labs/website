@@ -27,6 +27,15 @@ export interface Plan {
   cpu: number;
   build_timeout_seconds: number;
   price_cents: number;
+  /** Tagline shown under the price, e.g. "Temporarily discounted". Null when unset. */
+  note?: string | null;
+  /**
+   * The price before a discount, in cents. Shown crossed out next to the
+   * current price when higher than it. Display only — Whop charges its own
+   * plan price at checkout, so a real discount also needs a discounted Whop
+   * plan behind the tier.
+   */
+  previous_price_cents?: number | null;
 }
 
 export interface Subscription {

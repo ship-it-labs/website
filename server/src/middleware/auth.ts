@@ -81,12 +81,25 @@ export async function authenticateApiKey(
 
   const { data: user, error: userError } = await supabase
     .from("users")
-    .select("id, plan_id")
+    .select("id, plan_id, is_active")
     .eq("id", userId)
     .single();
 
   if (userError || !user) {
     reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "User not found" } });
+    return;
+  }
+
+  // Disabled by an admin. A 403 rather than 401: the credentials are valid,
+  // the account is not, and conflating the two sends people to reset a
+  // password that was never the problem.
+  if (user.is_active === false || user.is_active === 0) {
+    reply.status(403).send({
+      error: {
+        code: "ACCOUNT_DISABLED",
+        message: "This account has been disabled. Contact support.",
+      },
+    });
     return;
   }
 

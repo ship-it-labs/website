@@ -1,4 +1,5 @@
 import { publicBaseUrl } from "../config/urls.js";
+import { supabase } from "../db/index.js";
 
 /**
  * Decides where a build runs.
@@ -21,6 +22,44 @@ export function resolveBuildExecutor(): BuildExecutor {
   if (!token) return "runtime";
 
   return isReachableFromTheInternet(publicBaseUrl()) ? "github" : "runtime";
+}
+
+/**
+ * The admin panel's override for the executor. An explicit BUILD_EXECUTOR env
+ * var always wins — an operator who sets one has a reason — and the database
+ * setting decides only when the env is "auto" or unset. Falls back to the
+ * plain resolution when the settings table does not exist yet, so a database
+ * created before the admin panel cannot break builds.
+ */
+export async function resolveBuildExecutorWithSettings(): Promise<BuildExecutor> {
+  const configured = (process.env.BUILD_EXECUTOR ?? "auto").trim().toLowerCase();
+  if (configured === "github") return "github";
+  if (configured === "runtime") return "runtime";
+
+  try {
+    const { data } = await supabase
+      .from("platform_settings")
+      .select("value")
+      .eq("key", "build_executor")
+      .single();
+
+    const raw = (data as { value: unknown } | null)?.value;
+    const setting = typeof raw === "string" ? tryParseJson(raw) : raw;
+    if (setting === "github") return "github";
+    if (setting === "runtime") return "runtime";
+  } catch {
+    // A missing table or driver is not a build failure.
+  }
+
+  return resolveBuildExecutor();
+}
+
+function tryParseJson(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
 }
 
 /**

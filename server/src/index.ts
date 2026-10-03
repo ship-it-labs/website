@@ -24,6 +24,7 @@ import { startBuildPoller } from "./services/runtime-build.js";
 assertUrlsConfigured();
 import { buildRoutes } from "./routes/builds.js";
 import { buildReportRoutes } from "./routes/build-reports.js";
+import { adminRoutes } from "./routes/admin.js";
 import { projectRoutes } from "./routes/projects.js";
 import { runtimeRoutes } from "./routes/runtimes.js";
 import { billingRoutes, webhookRoutes } from "./routes/billing.js";
@@ -98,6 +99,9 @@ await app.register(buildRoutes, { prefix: "/api/v1" });
 // Separate from buildRoutes: this one is called by GitHub Actions with a shared
 // secret, not by a user with an API key, so it must not inherit that guard.
 await app.register(buildReportRoutes, { prefix: "/api/v1" });
+// Admin routes guard themselves twice: authenticateApiKey, then requireAdmin.
+// The pair is registered once for the whole plugin so no route can forget it.
+await app.register(adminRoutes, { prefix: "/api/v1" });
 await app.register(projectRoutes, { prefix: "/api/v1" });
 await app.register(runtimeRoutes, { prefix: "/api/v1" });
 await app.register(billingRoutes, { prefix: "/api/v1" });

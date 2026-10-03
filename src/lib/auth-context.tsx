@@ -13,6 +13,7 @@ interface AccountUser {
   id: string;
   email: string;
   plan_id?: string;
+  is_admin?: boolean;
 }
 
 interface AuthState {
@@ -37,6 +38,11 @@ interface LoginResponse {
   session: { access_token?: string } | null;
 }
 
+interface AccountResponse {
+  user: AccountUser;
+  is_admin?: boolean;
+}
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AccountUser | null>(null);
   const [loading, setLoading] = useState(true);
@@ -49,8 +55,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     api
-      .get<{ user: AccountUser }>("/api/v1/account")
-      .then((result) => setUser(result.user))
+      .get<AccountResponse>("/api/v1/account")
+      .then((result) =>
+        setUser({ ...result.user, is_admin: result.is_admin ?? result.user.is_admin ?? false })
+      )
       .catch(() => setAccessToken(null))
       .finally(() => setLoading(false));
   }, []);

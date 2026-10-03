@@ -8,7 +8,7 @@ import {
   listBuilds,
   GitHubDispatchError,
 } from "../services/build-service.js";
-import { resolveBuildExecutor } from "../services/build-executor.js";
+import { resolveBuildExecutorWithSettings } from "../services/build-executor.js";
 import { triggerRuntimeBuild } from "../services/runtime-build.js";
 import { recordBuild } from "../services/quota-service.js";
 import { isCommandAllowed, firstBlockedCommand } from "../services/command-guard.js";
@@ -79,7 +79,7 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
     );
 
     try {
-      const executor = resolveBuildExecutor();
+      const executor = await resolveBuildExecutorWithSettings();
 
       // GitHub only works when a hosted runner can reach this deployment. Locally
       // it cannot, so the build runs in the platform's own runtime instead of

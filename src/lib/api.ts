@@ -76,6 +76,7 @@ export async function apiRequest<T>(
 export const api = {
   get: <T,>(path: string) => apiRequest<T>(path),
   post: <T,>(path: string, body?: unknown) => apiRequest<T>(path, { method: "POST", body }),
+  patch: <T,>(path: string, body?: unknown) => apiRequest<T>(path, { method: "PATCH", body }),
 };
 
 function safeParse(text: string): unknown {

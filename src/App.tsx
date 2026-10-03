@@ -7,6 +7,7 @@ import { SignupPage } from "@/pages/signup";
 import { DashboardPage } from "@/pages/dashboard";
 import { ApiKeysPage } from "@/pages/api-keys";
 import { BillingPage } from "@/pages/billing";
+import { AdminPage } from "@/pages/admin";
 import { HomePage } from "@/pages/home";
 import { PricingPage } from "@/pages/pricing";
 import { DocsPage } from "@/pages/docs";
@@ -16,6 +17,15 @@ function Protected({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
   if (loading) return <p className="p-6 text-zinc-400">Loading…</p>;
   if (!user) return <Navigate to="/login" replace />;
+  return <>{children}</>;
+}
+
+// The tab is hidden for non-admins, but a hidden tab is not a guard: anyone
+// can type the URL. The server re-checks every /admin/* request, so this only
+// decides what renders, never what is allowed.
+function RequireAdmin({ children }: { children: ReactNode }) {
+  const { user } = useAuth();
+  if (!user?.is_admin) return <Navigate to="/dashboard" replace />;
   return <>{children}</>;
 }
 
@@ -49,6 +59,16 @@ export function App() {
         element={
           <Protected>
             <BillingPage />
+          </Protected>
+        }
+      />
+      <Route
+        path="/dashboard/admin"
+        element={
+          <Protected>
+            <RequireAdmin>
+              <AdminPage />
+            </RequireAdmin>
           </Protected>
         }
       />

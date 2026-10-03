@@ -24,6 +24,13 @@ const ADDED_COLUMNS: { table: string; column: string; definition: string }[] = [
   // Keys can carry a deadline after which the middleware refuses them.
   // Nullable because keys created before expiry existed never expire.
   { table: "api_keys", column: "expires_at", definition: "text" },
+  // Admin identity and account standing. A missing flag means an older database,
+  // where admin is decided by signup order and email instead.
+  { table: "users", column: "is_admin", definition: "integer not null default 0" },
+  { table: "users", column: "is_active", definition: "integer not null default 1" },
+  // Sale pricing: a tagline plus the pre-discount price shown crossed out.
+  { table: "plans", column: "note", definition: "text" },
+  { table: "plans", column: "previous_price_cents", definition: "integer" },
 ];
 
 /** Columns removed from the schema, dropped from existing databases. */
@@ -43,6 +50,11 @@ export function applyMigrations(db: SqliteDatabase): void {
     db.exec(`alter table ${table} add column ${column} ${definition}`);
   }
 
+  // Keys created by the old create-key route carry no id, so rotating or
+  // revoking them matches zero rows and reports success while changing
+  // nothing. Hand each one a stable id the first time the server boots.
+  backfillKeyIds(db);
+
   // Columns the platform no longer uses. Left in place they still come back from
   // `select *` and reach the API, which then disagrees with its own types.
   for (const { table, column } of REMOVED_COLUMNS) {
@@ -54,11 +66,29 @@ export function applyMigrations(db: SqliteDatabase): void {
   }
 }
 
+function backfillKeyIds(db: SqliteDatabase): void {
+  const columns = db.prepare("pragma table_info(api_keys)").all() as { name: string }[];
+  if (columns.length === 0) return;
+
+  const orphaned = db
+    .prepare("select rowid as rowid, key_prefix as prefix from api_keys where id is null")
+    .all() as { rowid: number; prefix: string }[];
+
+  for (const row of orphaned) {
+    // randomUUID is avoided here: schema.ts stays free of node:crypto so the
+    // same file can run in drivers and tests that stub the database interface.
+    const id = `key_${Date.now().toString(36)}_${Math.floor(Math.random() * 0xffffffff).toString(36)}`;
+    db.prepare("update api_keys set id = ? where rowid = ?").run(id, row.rowid);
+  }
+}
+
 export const SCHEMA_SQL = `
 create table if not exists users (
   id text primary key,
   email text not null unique,
   plan_id text not null default 'free',
+  is_admin integer not null default 0,
+  is_active integer not null default 1,
   created_at text not null default (datetime('now'))
 );
 
@@ -71,7 +101,9 @@ create table if not exists plans (
   max_ram_mb integer not null default 512,
   cpu real not null default 0.1,
   build_timeout_seconds integer not null default 180,
-  price_cents integer not null default 0
+  price_cents integer not null default 0,
+  note text,
+  previous_price_cents integer
 );
 
 create table if not exists api_keys (
@@ -213,6 +245,14 @@ create table if not exists webhook_events (
 );
 create index if not exists idx_webhook_events_key on webhook_events(idempotency_key);
 
+-- Platform kill switches and overrides, edited from the admin panel. A missing
+-- row means the default: signups open, executor automatic.
+create table if not exists platform_settings (
+  key text primary key,
+  value text not null default '{}',
+  updated_at text not null default (datetime('now'))
+);
+
 create table if not exists server_agents (
   id text primary key,
   manager_id text,
@@ -226,11 +266,19 @@ create table if not exists server_agents (
 `;
 
 export const SEED_PLANS_SQL = `
-insert or replace into plans
-  (id, name, runtime_hours_per_month, max_runtime_hours, max_concurrent_runtimes, max_ram_mb, cpu, build_timeout_seconds, price_cents)
+-- Insert-only: an existing tier is never touched here. Tier changes ship
+-- through explicit migrations, and anything an admin edits in the panel
+-- survives every reboot. INSERT OR REPLACE used to wipe those edits.
+insert or ignore into plans
+  (id, name, runtime_hours_per_month, max_runtime_hours, max_concurrent_runtimes, max_ram_mb, cpu, build_timeout_seconds, price_cents, note, previous_price_cents)
 values
-  ('free', 'Free', 24, 3, 1, 512, 0.1, 180, 0),
-  ('pro', 'Pro', 250, 6, 2, 512, 0.1, 300, 499),
-  ('plus', 'Plus', 500, 24, 2, 512, 0.1, 600, 999),
-  ('ultra', 'Ultra', 1000, 24, 3, 512, 0.1, 600, 1299);
+  ('free', 'Free', 24, 3, 1, 512, 0.1, 180, 0, null, null),
+  ('pro', 'Pro', 250, 6, 2, 512, 0.1, 300, 499, null, null),
+  ('plus', 'Plus', 500, 24, 2, 512, 0.1, 600, 999, null, null),
+  ('ultra', 'Ultra', 1000, 24, 3, 512, 0.1, 600, 1299, null, null);
+
+-- One-time repair: the old seed wrote Pro sessions as 8 hours while the
+-- orchestrator capped everyone at 3. Rows still carrying the stale 8 move to
+-- the intended 6; a row an admin already changed is left alone.
+update plans set max_runtime_hours = 6 where id = 'pro' and max_runtime_hours = 8;
 `;

@@ -17,6 +17,8 @@ interface Plan {
   cpu: number;
   build_timeout_seconds: number;
   price_cents: number;
+  note?: string | null;
+  previous_price_cents?: number | null;
 }
 
 // Shown until /api/v1/plans responds. Mirrors the server's seed so the page
@@ -138,12 +140,19 @@ export function PricingPage() {
             </div>
           </div>
 
-          <div className="mt-16 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="mt-16 grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
             {plans.map((plan, i) => {
               const featured = plan.id === "pro";
               const price = monthly
                 ? plan.price_cents
                 : Math.round(plan.price_cents * 0.8);
+              // The crossed-out figure follows the same billing toggle, so the
+              // comparison is always like for like. Shown only when it is
+              // genuinely higher — a stale or equal value renders nothing.
+              const previous = monthly
+                ? (plan.previous_price_cents ?? 0)
+                : Math.round((plan.previous_price_cents ?? 0) * 0.8);
+              const onSale = previous > price && price > 0;
 
               return (
                 <Reveal key={plan.id} delay={i * 110}>
@@ -163,10 +172,21 @@ export function PricingPage() {
 
                     <h2 className="text-lg font-semibold text-white">{plan.name}</h2>
 
-                    <div className="mt-5 flex items-baseline gap-1">
+                    {onSale && plan.note && (
+                      <p className="mt-2 inline-block rounded-full border border-emerald-400/30 bg-emerald-500/10 px-2.5 py-0.5 text-[11px] font-medium text-emerald-200">
+                        {plan.note}
+                      </p>
+                    )}
+
+                    <div className="mt-5 flex items-baseline gap-2">
                       <span className="font-serif text-5xl font-bold tracking-tight text-white">
                         ${(price / 100).toFixed(0)}
                       </span>
+                      {onSale && (
+                        <span className="text-lg text-zinc-500 line-through">
+                          ${(previous / 100).toFixed(0)}
+                        </span>
+                      )}
                       <span className="text-sm text-zinc-500">
                         {price === 0 ? "forever" : "/ month"}
                       </span>

@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { supabase } from "../db/index.js";
 import { generateApiKey } from "../utils/api-key.js";
 import { authenticateApiKey } from "../middleware/auth.js";
+import { isAdminUser } from "../services/admin.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -15,10 +16,12 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authenticateApiKey);
 
   // Lets the browser restore a session on reload and confirm the token is live.
+  // Also answers the only question the frontend's admin gate asks: is this user
+  // an admin, by flag, bootstrap address or signup order.
   app.get("/account", async (req, reply) => {
     const { data, error } = await supabase
       .from("users")
-      .select("id, email, plan_id")
+      .select("id, email, plan_id, is_admin")
       .eq("id", req.auth!.userId)
       .single();
 
@@ -26,7 +29,8 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(404).send({ error: { code: "USER_NOT_FOUND", message: "User not found" } });
     }
 
-    return reply.send({ user: data, plan: req.auth!.plan });
+    const user = data as { id: string; email: string; plan_id: string; is_admin?: boolean | number | null };
+    return reply.send({ user: data, plan: req.auth!.plan, is_admin: await isAdminUser(user) });
   });
 }
 
@@ -127,6 +131,20 @@ export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/api-keys/:id/revoke", async (req, reply) => {
     const { id } = req.params as { id: string };
+
+    // Checked first so revoking a missing or already-deleted key 404s instead
+    // of reporting success while changing nothing — which is exactly how the
+    // button came to look broken.
+    const { data: existing } = await supabase
+      .from("api_keys")
+      .select("id")
+      .eq("id", id)
+      .eq("user_id", req.auth!.userId)
+      .single();
+
+    if (!existing) {
+      return reply.status(404).send({ error: { code: "NOT_FOUND", message: "Key not found" } });
+    }
 
     const { error } = await supabase
       .from("api_keys")

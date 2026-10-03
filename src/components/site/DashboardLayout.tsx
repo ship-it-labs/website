@@ -10,6 +10,11 @@ const TABS = [
   { to: "/dashboard/billing", label: "Billing" },
 ];
 
+// Visible to admins only. The server enforces the same rule on every /admin/*
+// endpoint, so hiding the tab is convenience, not security — but showing a tab
+// that always 403s would be worse than hiding it.
+const ADMIN_TAB = { to: "/dashboard/admin", label: "Admin" };
+
 export function DashboardLayout({
   title,
   subtitle,
@@ -39,7 +44,7 @@ export function DashboardLayout({
           </Link>
 
           <nav className="hidden items-center gap-1 md:flex">
-            {TABS.map((tab) => (
+            {(user?.is_admin ? [...TABS, ADMIN_TAB] : TABS).map((tab) => (
               <Link
                 key={tab.to}
                 to={tab.to}
@@ -80,7 +85,7 @@ export function DashboardLayout({
 
         {menuOpen && (
           <div className="border-t border-white/[0.07] md:hidden">
-            {TABS.map((tab) => (
+            {(user?.is_admin ? [...TABS, ADMIN_TAB] : TABS).map((tab) => (
               <Link
                 key={tab.to}
                 to={tab.to}
