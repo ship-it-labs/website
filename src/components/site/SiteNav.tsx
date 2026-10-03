@@ -43,22 +43,14 @@ export function SiteNav() {
         <Link
           to="/"
           className="flex items-center gap-2.5 text-[15px] font-semibold tracking-tight text-white"
+          aria-label="Ship-It home"
         >
-          <span className="relative flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-violet-500 to-cyan-400">
-            <span className="absolute inset-0 rounded-lg bg-violet-500/60 blur-md" />
-            <svg
-              viewBox="0 0 24 24"
-              className="relative h-4 w-4 text-white"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2.4"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            >
-              <path d="M5 12h14M13 6l6 6-6 6" />
-            </svg>
-          </span>
-          Ship-It
+          <img
+            src="/logo.jpg"
+            alt="Ship-It"
+            className="h-7 w-auto"
+            draggable={false}
+          />
         </Link>
 
         <div className="hidden items-center gap-1 md:flex">

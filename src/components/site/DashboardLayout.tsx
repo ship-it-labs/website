@@ -39,8 +39,13 @@ export function DashboardLayout({
 
       <header className="sticky top-0 z-40 border-b border-white/[0.07] bg-zinc-950/70 backdrop-blur-xl">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
-          <Link to="/" className="text-[15px] font-semibold tracking-tight text-white">
-            Ship-It
+          <Link to="/" aria-label="Ship-It home">
+            <img
+              src="/logo.jpg"
+              alt="Ship-It"
+              className="h-7 w-auto"
+              draggable={false}
+            />
           </Link>
 
           <nav className="hidden items-center gap-1 md:flex">
