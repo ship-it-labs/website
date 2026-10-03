@@ -45,10 +45,27 @@ async function resolveUserId(
     return { userId: data.user_id as string, apiKeyId: data.id as string };
   }
 
-  // Session token. Only the local SQLite driver issues these.
+  // Session token. The local SQLite driver resolves its own opaque tokens; in
+  // production the token is a Supabase Auth JWT, validated against the Auth
+  // API. Without the second path the dashboard login works locally and 401s
+  // on every single request in production, which reads as "invalid
+  // credentials" no matter how correctly the user logged in.
   const local = supabase as { getUserIdForToken?: (token: string) => string | null };
-  const userId = local.getUserIdForToken?.(token) ?? null;
-  return userId ? { userId, apiKeyId: "" } : null;
+  const localUserId = local.getUserIdForToken?.(token) ?? null;
+  if (localUserId) return { userId: localUserId, apiKeyId: "" };
+
+  const auth = supabase.auth as unknown as {
+    getUser?: (token: string) => Promise<{ data: { user: { id: string } | null } }>;
+  };
+  if (typeof auth.getUser !== "function") return null;
+
+  try {
+    const { data } = await auth.getUser(token);
+    const id = data?.user?.id;
+    return id ? { userId: id, apiKeyId: "" } : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function authenticateApiKey(
