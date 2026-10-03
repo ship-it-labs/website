@@ -8,6 +8,8 @@ import {
   listBuilds,
   GitHubDispatchError,
 } from "../services/build-service.js";
+import { resolveBuildExecutor } from "../services/build-executor.js";
+import { triggerRuntimeBuild } from "../services/runtime-build.js";
 import { recordBuild } from "../services/quota-service.js";
 import { isCommandAllowed, firstBlockedCommand } from "../services/command-guard.js";
 import { supabase } from "../db/index.js";
@@ -76,7 +78,17 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
     );
 
     try {
-      await triggerGitHubActionsBuild(build.id);
+      const executor = resolveBuildExecutor();
+
+      // GitHub only works when a hosted runner can reach this deployment. Locally
+      // it cannot, so the build runs in the platform's own runtime instead of
+      // failing at the download step.
+      if (executor === "github") {
+        await triggerGitHubActionsBuild(build.id);
+      } else {
+        await triggerRuntimeBuild(build.id);
+      }
+
       await recordBuild(req.auth!.userId);
     } catch (err) {
       logger.error({ err, buildId: build.id }, "Failed to trigger build");

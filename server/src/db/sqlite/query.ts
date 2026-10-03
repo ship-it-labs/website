@@ -121,6 +121,16 @@ class TableQuery implements PromiseLike<QueryResult> {
     return this.condition(column, "like", value);
   }
 
+  /** Matches any of the supplied values, matching Supabase's `.in`. */
+  in(column: string, values: readonly unknown[]): this {
+    return this.condition(column, "in", values);
+  }
+
+  /** True when none of the supplied values match, matching Supabase's `.not.in`. */
+  notIn(column: string, values: readonly unknown[]): this {
+    return this.condition(column, "not_in", values);
+  }
+
   private condition(column: string, op: string, value: unknown): this {
     this.conditions.push([column, op, value]);
     return this;
@@ -179,6 +189,23 @@ class TableQuery implements PromiseLike<QueryResult> {
   private buildWhere(values: unknown[]): string {
     if (this.conditions.length === 0) return "";
     const clauses = this.conditions.map(([column, op, value]) => {
+      // Set membership expands to one placeholder per value, which is why it
+      // cannot go through the single-value path above.
+      if (op === "in" || op === "not_in") {
+        const items = Array.isArray(value) ? value : [value];
+        if (items.length === 0) {
+          // An empty set can match nothing, so it is written as a condition that
+          // is always false rather than as invalid SQL.
+          return op === "in" ? "1 = 0" : "1 = 1";
+        }
+        const placeholders = items.map((item) => {
+          values.push(item);
+          return "?";
+        });
+        const keyword = op === "in" ? "in" : "not in";
+        return `${quoteIdent(column)} ${keyword} (${placeholders.join(", ")})`;
+      }
+
       values.push(value);
       return `${quoteIdent(column)} ${OPERATORS[op]} ?`;
     });

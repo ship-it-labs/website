@@ -11,14 +11,14 @@ import { logger } from "./utils/logger.js";
 import { usingSqlite } from "./db/index.js";
 import { authRoutes } from "./routes/auth.js";
 import { apiKeyRoutes, accountRoutes } from "./routes/api-keys.js";
-import {
-  allowedOrigins,
+import { allowedOrigins,
   assertUrlsConfigured,
   publicBaseUrl,
   siteUrl,
   whopWebhookUrl,
   billingReturnUrl,
 } from "./config/urls.js";
+import { startBuildPoller } from "./services/runtime-build.js";
 
 // Fail here rather than later, when a customer is handed a link to nowhere.
 assertUrlsConfigured();
@@ -166,6 +166,9 @@ if (fs.existsSync(FRONTEND_DIST)) {
 
 seedPlans().catch((err) => logger.error({ err }, "Failed to seed plans"));
 startLeaseExpiryWorker();
+// Collects the outcome of builds running inside the platform's own runtime, so
+// their status and logs reach the dashboard.
+startBuildPoller();
 
 try {
   await app.listen({ port: PORT, host: HOST });
