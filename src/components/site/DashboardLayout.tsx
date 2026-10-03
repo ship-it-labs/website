@@ -41,7 +41,7 @@ export function DashboardLayout({
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <Link to="/" aria-label="Ship-It home">
             <img
-              src="/logo.jpg"
+              src="/logo.png"
               alt="Ship-It"
               className="h-7 w-auto"
               draggable={false}

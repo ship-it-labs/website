@@ -46,7 +46,7 @@ export function SiteNav() {
           aria-label="Ship-It home"
         >
           <img
-            src="/logo.jpg"
+            src="/logo.png"
             alt="Ship-It"
             className="h-7 w-auto"
             draggable={false}
