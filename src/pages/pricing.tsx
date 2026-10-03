@@ -67,7 +67,11 @@ export function PricingPage() {
     api
       .get<{ plans: Plan[] }>("/api/v1/plans")
       .then((result) => {
-        if (result.plans?.length) setPlans(result.plans);
+        // Cheapest first, always: database row order is insertion order, which
+        // once displayed Plus between Free and Ultra on the billing page.
+        if (result.plans?.length) {
+          setPlans([...result.plans].sort((a, b) => a.price_cents - b.price_cents));
+        }
       })
       .catch(() => {
         // The page stays useful without the API; the seeded values match.

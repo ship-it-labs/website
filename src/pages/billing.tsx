@@ -38,7 +38,9 @@ export function BillingPage() {
         api.get<{ plans: Plan[] }>("/api/v1/plans"),
         api.get<{ subscription: Subscription | null }>("/api/v1/billing/subscription"),
       ]);
-      setPlans(p.plans);
+      // Cheapest first, always: database row order is insertion order, which is
+      // how Plus ended up displayed between Free and Ultra.
+      setPlans([...p.plans].sort((a, b) => a.price_cents - b.price_cents));
       setSubscription(s.subscription);
       setError(null);
     } catch (err) {
