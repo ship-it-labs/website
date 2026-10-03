@@ -14,6 +14,7 @@ import { recordBuild } from "../services/quota-service.js";
 import { isCommandAllowed, firstBlockedCommand } from "../services/command-guard.js";
 import { supabase } from "../db/index.js";
 import { logger } from "../utils/logger.js";
+import type { Build } from "../types/index.js";
 
 /**
  * A project does not have to be compiled. Static sites and plain scripts can be
@@ -167,6 +168,23 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/builds", async (req, reply) => {
     const builds = await listBuilds(req.auth!.userId);
-    return reply.send({ builds });
+    // The browser cannot build the run link itself: it has no idea which
+    // repository the workflow runs in.
+    return reply.send({ builds: builds.map(withRunUrl) });
   });
+}
+
+const GITHUB_REPO = process.env.GITHUB_REPO || "Ship-it-labs/opencode-plugin";
+
+/**
+ * A link to the GitHub run behind a build, when there is one. Builds executed by
+ * the platform's own runtime never have a run id and get no link.
+ */
+function withRunUrl(build: Build) {
+  return {
+    ...build,
+    github_run_url: build.workflow_run_id
+      ? `https://github.com/${GITHUB_REPO}/actions/runs/${build.workflow_run_id}`
+      : null,
+  };
 }

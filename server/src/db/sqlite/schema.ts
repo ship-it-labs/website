@@ -21,6 +21,9 @@ export interface SqliteDatabase {
 const ADDED_COLUMNS: { table: string; column: string; definition: string }[] = [
   { table: "plans", column: "max_concurrent_runtimes", definition: "integer not null default 1" },
   { table: "projects", column: "run_command", definition: "text" },
+  // Keys can carry a deadline after which the middleware refuses them.
+  // Nullable because keys created before expiry existed never expire.
+  { table: "api_keys", column: "expires_at", definition: "text" },
 ];
 
 /** Columns removed from the schema, dropped from existing databases. */
@@ -79,7 +82,8 @@ create table if not exists api_keys (
   name text not null default 'default',
   is_active integer not null default 1,
   created_at text not null default (datetime('now')),
-  last_used_at text
+  last_used_at text,
+  expires_at text
 );
 create index if not exists idx_api_keys_user on api_keys(user_id);
 create index if not exists idx_api_keys_hash on api_keys(key_hash);
@@ -226,7 +230,7 @@ insert or replace into plans
   (id, name, runtime_hours_per_month, max_runtime_hours, max_concurrent_runtimes, max_ram_mb, cpu, build_timeout_seconds, price_cents)
 values
   ('free', 'Free', 24, 3, 1, 512, 0.1, 180, 0),
-  ('pro', 'Pro', 250, 8, 2, 512, 0.1, 300, 499),
+  ('pro', 'Pro', 250, 6, 2, 512, 0.1, 300, 499),
   ('plus', 'Plus', 500, 24, 2, 512, 0.1, 600, 999),
   ('ultra', 'Ultra', 1000, 24, 3, 512, 0.1, 600, 1299);
 `;

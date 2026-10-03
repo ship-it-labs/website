@@ -19,21 +19,36 @@ function isApiKey(token: string): boolean {
  * a long-lived account API key, which the OpenCode plugin uses, and a session
  * token issued by login, which the dashboard uses. Both end up on the same user
  * row so the AI and the human see the same account and quota.
+ *
+ * Returns the key row too, because rotating or revoking the key the caller is
+ * holding needs to be treated differently from touching any other key: the
+ * first kills the session that made the request.
  */
-async function resolveUserId(token: string): Promise<string | null> {
+async function resolveUserId(
+  token: string
+): Promise<{ userId: string; apiKeyId: string } | null> {
   if (isApiKey(token)) {
     const { data } = await supabase
       .from("api_keys")
-      .select("user_id, is_active")
+      .select("id, user_id, is_active, expires_at")
       .eq("key_hash", hashApiKey(token))
       .single();
 
-    return data?.is_active ? data.user_id : null;
+    if (!data?.is_active) return null;
+
+    // An expired key is not an invalid key. Saying so would send someone
+    // re-checking a token they know is typed correctly.
+    if (data.expires_at && new Date(data.expires_at).getTime() <= Date.now()) {
+      return null;
+    }
+
+    return { userId: data.user_id as string, apiKeyId: data.id as string };
   }
 
   // Session token. Only the local SQLite driver issues these.
   const local = supabase as { getUserIdForToken?: (token: string) => string | null };
-  return local.getUserIdForToken?.(token) ?? null;
+  const userId = local.getUserIdForToken?.(token) ?? null;
+  return userId ? { userId, apiKeyId: "" } : null;
 }
 
 export async function authenticateApiKey(
@@ -47,12 +62,22 @@ export async function authenticateApiKey(
   }
 
   const token = authHeader.slice(7);
-  const userId = await resolveUserId(token);
+  const resolved = await resolveUserId(token);
 
-  if (!userId) {
-    reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "Invalid credentials" } });
+  if (!resolved) {
+    const expired = await isExpiredKey(token);
+    reply.status(401).send({
+      error: {
+        code: expired ? "KEY_EXPIRED" : "UNAUTHORIZED",
+        message: expired
+          ? "This API key has expired. Create a new one."
+          : "Invalid credentials",
+      },
+    });
     return;
   }
+
+  const userId = resolved.userId;
 
   const { data: user, error: userError } = await supabase
     .from("users")
@@ -83,7 +108,30 @@ export async function authenticateApiKey(
       .eq("key_hash", hashApiKey(token));
   }
 
-  req.auth = { userId: user.id, plan: plan as Plan, apiKeyId: "" };
+  req.auth = { userId: user.id, plan: plan as Plan, apiKeyId: resolved.apiKeyId };
 
   logger.debug({ userId: user.id }, "Request authenticated");
+}
+
+/**
+ * Distinguishes an expired key from a wrong one for the error message above.
+ * Runs only after authentication already failed, so a second lookup here costs
+ * nothing on the path that matters.
+ */
+async function isExpiredKey(token: string): Promise<boolean> {
+  if (!token.startsWith("ox_live_") && !token.startsWith("ox_test_")) {
+    return false;
+  }
+
+  const { data } = await supabase
+    .from("api_keys")
+    .select("is_active, expires_at")
+    .eq("key_hash", hashApiKey(token))
+    .single();
+
+  return Boolean(
+    data?.is_active &&
+      data?.expires_at &&
+      new Date(data.expires_at as string).getTime() <= Date.now()
+  );
 }

@@ -9,6 +9,7 @@ import {
   EmptyState,
 } from "@/components/site/DashboardLayout";
 import { BuildLogViewer } from "@/components/site/BuildLogViewer";
+import { RuntimeDetail } from "@/components/site/RuntimeDetail";
 import {
   LeaseCountdown,
   useNow,
@@ -44,6 +45,7 @@ interface Build {
   status: string;
   exit_code: number | null;
   created_at: string;
+  github_run_url: string | null;
 }
 
 export function DashboardPage() {
@@ -52,7 +54,8 @@ export function DashboardPage() {
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
   const [builds, setBuilds] = useState<Build[]>([]);
   const [error, setError] = useState<string | null>(null);
-  const [openBuild, setOpenBuild] = useState<string | null>(null);
+  const [openBuild, setOpenBuild] = useState<Build | null>(null);
+  const [openRuntime, setOpenRuntime] = useState<string | null>(null);
   const now = useNow();
 
   const welcome = new URLSearchParams(window.location.search).has("welcome");
@@ -176,7 +179,7 @@ export function DashboardPage() {
       </div>
 
       <div className="mt-8 grid gap-6 lg:grid-cols-2">
-        <Panel title="Runtimes" description="Started and stopped by the agent.">
+        <Panel title="Runtimes" description="Select a runtime to see its specs and controls.">
           {runtimes.length === 0 ? (
             <EmptyState>
               No runtimes yet. Ask the agent to build and run a project.
@@ -184,26 +187,27 @@ export function DashboardPage() {
           ) : (
             <ul className="divide-y divide-white/[0.06]">
               {runtimes.slice(0, 8).map((runtime) => (
-                <li key={runtime.id} className="py-3.5 first:pt-0 last:pb-0">
-                  <div className="flex items-start justify-between gap-4">
+                <li key={runtime.id} className="first:pt-0 last:pb-0">
+                  <button
+                    type="button"
+                    onClick={() => setOpenRuntime(runtime.id)}
+                    aria-label={`Open runtime ${runtime.id}`}
+                    className="flex w-full items-start justify-between gap-4 py-3.5 text-left transition-colors hover:bg-white/[0.03]"
+                  >
                     <div className="min-w-0">
                       <p className="truncate font-mono text-xs text-zinc-400">
                         {runtime.id}
                       </p>
                       {runtime.app_url ? (
-                        <a
-                          href={runtime.app_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="mt-1 block truncate text-sm text-violet-300 transition-colors hover:text-violet-200"
-                        >
+                        <span className="mt-1 block truncate text-sm text-violet-300">
                           {runtime.app_url}
-                        </a>
+                        </span>
                       ) : (
                         <p className="mt-1 text-sm text-zinc-600">No public URL</p>
                       )}
                       {runtime.status === "running" ||
-                      runtime.status === "starting" ? (
+                      runtime.status === "starting" ||
+                      runtime.status === "paused" ? (
                         <p className="mt-1.5">
                           <LeaseCountdown
                             leaseExpiresAt={runtime.lease_expires_at}
@@ -212,8 +216,24 @@ export function DashboardPage() {
                         </p>
                       ) : null}
                     </div>
-                    <StatusDot status={runtime.status} />
-                  </div>
+                    <span className="flex shrink-0 items-center gap-3 pt-0.5">
+                      <StatusDot status={runtime.status} />
+                      <svg
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="1.75"
+                        className="h-4 w-4 text-zinc-600"
+                        aria-hidden="true"
+                      >
+                        <path
+                          d="M9 6l6 6-6 6"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                    </span>
+                  </button>
                 </li>
               ))}
             </ul>
@@ -229,7 +249,7 @@ export function DashboardPage() {
                 <li key={build.id}>
                   <button
                     type="button"
-                    onClick={() => setOpenBuild(build.id)}
+                    onClick={() => setOpenBuild(build)}
                     aria-label={`Open build ${build.id}`}
                     className="flex w-full items-center justify-between gap-4 py-3.5 text-left transition-colors hover:bg-white/[0.03] first:pt-0 last:pb-0"
                   >
@@ -268,7 +288,21 @@ export function DashboardPage() {
       </div>
 
       {openBuild && (
-        <BuildLogViewer buildId={openBuild} onClose={() => setOpenBuild(null)} />
+        <BuildLogViewer
+          buildId={openBuild.id}
+          githubRunUrl={openBuild.github_run_url}
+          onClose={() => setOpenBuild(null)}
+        />
+      )}
+
+      {openRuntime && (
+        <RuntimeDetail
+          runtimeId={openRuntime}
+          now={now}
+          plan={usage?.plan}
+          onClose={() => setOpenRuntime(null)}
+          onChanged={load}
+        />
       )}
 
       {user && (

@@ -8,7 +8,7 @@ export function Modal({
   width = "max-w-3xl",
 }: {
   title: string;
-  description?: string;
+  description?: ReactNode;
   onClose: () => void;
   children: ReactNode;
   width?: string;

@@ -37,7 +37,7 @@ const FALLBACK: Plan[] = [
     id: "pro",
     name: "Pro",
     runtime_hours_per_month: 250,
-    max_runtime_hours: 8,
+    max_runtime_hours: 6,
     max_concurrent_runtimes: 2,
     max_ram_mb: 512,
     cpu: 0.1,

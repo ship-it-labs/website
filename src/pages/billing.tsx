@@ -146,8 +146,13 @@ export function BillingPage() {
               <ul className="mt-6 space-y-2.5 text-sm text-zinc-400">
                 <li>{plan.runtime_hours_per_month} runtime hours / month</li>
                 <li>{formatDuration(plan.max_runtime_hours * 3600)} max session</li>
-                <li>{plan.max_ram_mb} MB memory</li>
-                <li>{plan.cpu} CPU</li>
+                {plan.id === "free" && (
+                  <>
+                    <li>{plan.max_ram_mb} MB memory</li>
+                    <li>{plan.cpu} CPU</li>
+                  </>
+                )}
+                <li>Builds use 16GB RAM and 4 vCPUs</li>
                 <li>{plan.build_timeout_seconds}s build timeout</li>
               </ul>
               {plan.price_cents > 0 && (

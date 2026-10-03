@@ -145,7 +145,7 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  const simpleActions = ["stop", "restart", "logs", "info", "health"] as const;
+  const simpleActions = ["stop", "restart", "logs", "info", "health", "pause", "resume"] as const;
 
   for (const action of simpleActions) {
     app.post(`/runtimes/:id/${action}`, async (req, reply) => {
@@ -160,6 +160,11 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
         if (err instanceof OrchestratorError && err.code === "RUNTIME_NOT_FOUND") {
           return reply.status(404).send({
             error: { code: "RUNTIME_NOT_FOUND", message: "Runtime not found" },
+          });
+        }
+        if (err instanceof OrchestratorError && isCallerError(err.code)) {
+          return reply.status(409).send({
+            error: { code: err.code, message: err.message },
           });
         }
         logger.error({ err, runtimeId: id, action }, `Orchestrator ${action} failed`);
@@ -266,7 +271,12 @@ function isCallerError(code: string): boolean {
     code === "VALIDATION_ERROR" ||
     code === "INVALID_OPERATION" ||
     code === "PATH_TRAVERSAL" ||
-    code === "RUNTIME_NOT_FOUND"
+    code === "RUNTIME_NOT_FOUND" ||
+    // Pausing a stopped runtime, or resuming one that is already running, is a
+    // conflict. Reporting it as an unreachable orchestrator sends people
+    // looking for a dead service instead of at their own button.
+    code === "PAUSE_FAILED" ||
+    code === "RESUME_FAILED"
   );
 }
 

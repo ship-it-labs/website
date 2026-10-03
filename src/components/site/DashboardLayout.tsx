@@ -158,9 +158,12 @@ export function StatusDot({ status }: { status: string }) {
       ? "bg-emerald-400"
       : status === "starting"
         ? "bg-amber-400"
-        : status === "expired" || status === "crashed"
-          ? "bg-rose-400"
-          : "bg-zinc-600";
+        // Paused is alive but idle, so it reads as neither healthy nor failed.
+        : status === "paused"
+          ? "bg-sky-400"
+          : status === "expired" || status === "crashed"
+            ? "bg-rose-400"
+            : "bg-zinc-600";
 
   return (
     <span className="inline-flex items-center gap-2 text-sm text-zinc-300">

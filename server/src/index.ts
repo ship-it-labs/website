@@ -23,6 +23,7 @@ import { startBuildPoller } from "./services/runtime-build.js";
 // Fail here rather than later, when a customer is handed a link to nowhere.
 assertUrlsConfigured();
 import { buildRoutes } from "./routes/builds.js";
+import { buildReportRoutes } from "./routes/build-reports.js";
 import { projectRoutes } from "./routes/projects.js";
 import { runtimeRoutes } from "./routes/runtimes.js";
 import { billingRoutes, webhookRoutes } from "./routes/billing.js";
@@ -94,6 +95,9 @@ await app.register(authRoutes, { prefix: "/api/v1" });
 await app.register(accountRoutes, { prefix: "/api/v1" });
 await app.register(apiKeyRoutes, { prefix: "/api/v1/account" });
 await app.register(buildRoutes, { prefix: "/api/v1" });
+// Separate from buildRoutes: this one is called by GitHub Actions with a shared
+// secret, not by a user with an API key, so it must not inherit that guard.
+await app.register(buildReportRoutes, { prefix: "/api/v1" });
 await app.register(projectRoutes, { prefix: "/api/v1" });
 await app.register(runtimeRoutes, { prefix: "/api/v1" });
 await app.register(billingRoutes, { prefix: "/api/v1" });

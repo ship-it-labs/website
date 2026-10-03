@@ -20,9 +20,11 @@ const MAX_TABS = 400;
 
 export function BuildLogViewer({
   buildId,
+  githubRunUrl,
   onClose,
 }: {
   buildId: string;
+  githubRunUrl?: string | null;
   onClose: () => void;
 }) {
   const [logs, setLogs] = useState<BuildLog[] | null>(null);
@@ -75,7 +77,23 @@ export function BuildLogViewer({
   return (
     <Modal
       title={buildId}
-      description="Build output"
+      description={
+        githubRunUrl ? (
+          <span>
+            Build output ·{" "}
+            <a
+              href={githubRunUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="text-violet-400 transition-colors hover:text-violet-300"
+            >
+              View GitHub Actions run
+            </a>
+          </span>
+        ) : (
+          "Build output"
+        )
+      }
       onClose={onClose}
       width="max-w-5xl"
     >
@@ -104,10 +122,28 @@ export function BuildLogViewer({
       ) : logs === null ? (
         <p className="text-sm text-zinc-500">Loading output...</p>
       ) : logs.length === 0 ? (
-        <p className="text-sm text-zinc-500">
-          No output was captured for this build. Builds that run in GitHub
-          Actions keep their logs in the workflow run.
-        </p>
+        <div className="text-sm text-zinc-500">
+          <p>
+            No output has been reported for this build yet.
+          </p>
+          {githubRunUrl ? (
+            <p className="mt-3">
+              <a
+                href={githubRunUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="text-violet-300 transition-colors hover:text-violet-200"
+              >
+                Read the output in the GitHub Actions run
+              </a>
+            </p>
+          ) : (
+            <p className="mt-3">
+              Builds that run on GitHub Actions publish their output once the
+              run finishes.
+            </p>
+          )}
+        </div>
       ) : (
         <>
           {hidden > 0 && (
