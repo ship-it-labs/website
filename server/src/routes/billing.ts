@@ -122,9 +122,9 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
 
 export async function webhookRoutes(app: FastifyInstance): Promise<void> {
   app.post("/webhooks/whop", async (req, reply) => {
-    const webhookId = req.headers["whop-webhook-id"];
-    const timestamp = req.headers["whop-timestamp"];
-    const signature = req.headers["whop-signature"];
+    const webhookId = req.headers["webhook-id"];
+    const timestamp = req.headers["webhook-timestamp"];
+    const signature = req.headers["webhook-signature"];
 
     const header = (value: string | string[] | undefined): string =>
       Array.isArray(value) ? (value[0] ?? "") : (value ?? "");
