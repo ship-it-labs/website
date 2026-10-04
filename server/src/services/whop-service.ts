@@ -250,7 +250,7 @@ export function verifyWebhookSignature(params: {
     return false;
   }
 
-  const key = Buffer.from(secret, "base64");
+  const key = Buffer.from(secret, "utf8");
   const expected = crypto
     .createHmac("sha256", key)
     .update(`${params.webhookId}.${params.timestamp}.${params.body}`)
