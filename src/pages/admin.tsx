@@ -213,7 +213,127 @@ function OverviewSection({ onError }: { onError: (message: string | null) => voi
           )}
         </Panel>
       </div>
+
+      <div className="mt-6">
+        <DiagnosticsPanel onError={onError} />
+      </div>
     </>
+  );
+}
+
+interface Diagnostics {
+  node_env: string;
+  database: string;
+  urls: {
+    public_base_url: string;
+    site_url: string;
+    orchestrator_url: string;
+  };
+  whop: {
+    sandbox_key: boolean;
+    live_key: boolean;
+    webhook_secret: boolean;
+    pro_plan: boolean;
+    ultra_plan: boolean;
+  };
+  github: {
+    token: boolean;
+    repo: string;
+    executor: string;
+    report_token: boolean;
+  };
+  orchestrator_reachable: boolean;
+}
+
+function CheckRow({ label, ok, detail }: { label: string; ok: boolean; detail?: string }) {
+  return (
+    <li className="flex items-center justify-between gap-4 py-2 first:pt-0 last:pb-0">
+      <span className="text-sm text-zinc-300">
+        {label}
+        {detail && <span className="ml-2 font-mono text-xs text-zinc-500">{detail}</span>}
+      </span>
+      <span
+        className={`shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[11px] ${
+          ok ? "bg-emerald-500/15 text-emerald-200" : "bg-rose-500/15 text-rose-200"
+        }`}
+      >
+        {ok ? "set" : "missing"}
+      </span>
+    </li>
+  );
+}
+
+/**
+ * Configuration self-check: presence booleans only, never secret values. When
+ * something works locally but not on a deploy, the cause is an env var here
+ * showing "missing" — no Render dashboard spelunking required.
+ */
+function DiagnosticsPanel({ onError }: { onError: (message: string | null) => void }) {
+  const [diagnostics, setDiagnostics] = useState<Diagnostics | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setDiagnostics(await api.get<Diagnostics>("/api/v1/admin/diagnostics"));
+      onError(null);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Could not load diagnostics");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (!diagnostics) return null;
+
+  return (
+    <Panel
+      title="Configuration"
+      description={`Running on ${diagnostics.node_env} with ${diagnostics.database}. Orchestrator ${diagnostics.orchestrator_reachable ? "reachable" : "unreachable"}.`}
+    >
+      <div className="grid gap-x-8 gap-y-6 md:grid-cols-2">
+        <div>
+          <p className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
+            Addresses in effect
+          </p>
+          <ul className="divide-y divide-white/[0.06]">
+            <li className="flex items-center justify-between gap-4 py-2 first:pt-0 last:pb-0">
+              <span className="text-sm text-zinc-300">Public URL</span>
+              <span className="truncate font-mono text-xs text-zinc-400">{diagnostics.urls.public_base_url}</span>
+            </li>
+            <li className="flex items-center justify-between gap-4 py-2 first:pt-0 last:pb-0">
+              <span className="text-sm text-zinc-300">Site URL</span>
+              <span className="truncate font-mono text-xs text-zinc-400">{diagnostics.urls.site_url}</span>
+            </li>
+            <li className="flex items-center justify-between gap-4 py-2 first:pt-0 last:pb-0">
+              <span className="text-sm text-zinc-300">Orchestrator</span>
+              <span className="truncate font-mono text-xs text-zinc-400">{diagnostics.urls.orchestrator_url}</span>
+            </li>
+            <li className="flex items-center justify-between gap-4 py-2 first:pt-0 last:pb-0">
+              <span className="text-sm text-zinc-300">Build executor</span>
+              <span className="font-mono text-xs text-zinc-400">
+                {diagnostics.github.executor} · {diagnostics.github.repo}
+              </span>
+            </li>
+          </ul>
+        </div>
+        <div>
+          <p className="mb-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
+            Secrets present (values never shown)
+          </p>
+          <ul className="divide-y divide-white/[0.06]">
+            <CheckRow label="Whop sandbox key" ok={diagnostics.whop.sandbox_key} />
+            <CheckRow label="Whop live key" ok={diagnostics.whop.live_key} />
+            <CheckRow label="Whop webhook secret" ok={diagnostics.whop.webhook_secret} />
+            <CheckRow label="Whop Pro plan" ok={diagnostics.whop.pro_plan} />
+            <CheckRow label="Whop Ultra plan" ok={diagnostics.whop.ultra_plan} />
+            <CheckRow label="GitHub token" ok={diagnostics.github.token} />
+            <CheckRow label="Build report token" ok={diagnostics.github.report_token} />
+          </ul>
+        </div>
+      </div>
+    </Panel>
   );
 }
 
@@ -587,6 +707,10 @@ interface Payments {
 
 function PaymentsSection({ onError }: { onError: (message: string | null) => void }) {
   const [payments, setPayments] = useState<Payments | null>(null);
+  const [email, setEmail] = useState("");
+  const [membershipId, setMembershipId] = useState("");
+  const [attaching, setAttaching] = useState(false);
+  const [attachResult, setAttachResult] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -603,6 +727,29 @@ function PaymentsSection({ onError }: { onError: (message: string | null) => voi
     const timer = window.setInterval(load, 30_000);
     return () => window.clearInterval(timer);
   }, [load]);
+
+  async function attach() {
+    if (!email.trim() || !membershipId.trim()) {
+      onError("Enter the account email and the Whop membership id.");
+      return;
+    }
+    setAttaching(true);
+    setAttachResult(null);
+    try {
+      const result = await api.post<{ plan_id: string; status: string }>(
+        "/api/v1/admin/subscriptions/attach",
+        { user_email: email.trim(), whop_membership_id: membershipId.trim() }
+      );
+      setAttachResult(`Attached: ${result.plan_id} (${result.status}).`);
+      setEmail("");
+      setMembershipId("");
+      await load();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Could not attach the membership");
+    } finally {
+      setAttaching(false);
+    }
+  }
 
   if (!payments) return <p className="text-sm text-zinc-500">Loading…</p>;
 
@@ -684,6 +831,51 @@ function PaymentsSection({ onError }: { onError: (message: string | null) => voi
               ))}
             </ul>
           )}
+        </Panel>
+      </div>
+
+      <div className="mt-6">
+        <Panel
+          title="Attach a membership"
+          description="Links a Whop membership to an account when the webhook missed it: a direct-link purchase with no metadata, or a half-applied event from before the atomicity fix. Reads the membership live from Whop — nothing is trusted from the input alone."
+        >
+          {attachResult && (
+            <p className="mb-4 text-sm text-emerald-200">{attachResult}</p>
+          )}
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-end">
+            <label className="flex-1">
+              <span className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">
+                Account email
+              </span>
+              <input
+                type="email"
+                value={email}
+                onChange={(event) => setEmail(event.target.value)}
+                placeholder="customer@example.com"
+                className="w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none"
+              />
+            </label>
+            <label className="flex-1">
+              <span className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">
+                Whop membership id
+              </span>
+              <input
+                type="text"
+                value={membershipId}
+                onChange={(event) => setMembershipId(event.target.value)}
+                placeholder="mem_… (from the Whop dashboard)"
+                className="w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2.5 font-mono text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none"
+              />
+            </label>
+            <button
+              type="button"
+              disabled={attaching}
+              onClick={attach}
+              className="rounded-xl bg-white px-5 py-2.5 text-sm font-medium text-zinc-950 transition-transform duration-200 hover:scale-[1.02] disabled:opacity-60"
+            >
+              {attaching ? "Working…" : "Attach"}
+            </button>
+          </div>
         </Panel>
       </div>
     </>

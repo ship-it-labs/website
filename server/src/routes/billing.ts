@@ -174,6 +174,17 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
 
     const outcome = await handleWebhookEvent(event);
 
+    // A failure here is a 500, not a 200 with handled:false: Whop retries
+    // failures, which is exactly what a half-applied event needs, while a
+    // silent 200 would lose the payment mapping forever. Duplicates already
+    // report handled:true above and stay 200.
+    if (!outcome.handled && !outcome.duplicate) {
+      return reply.status(500).send({
+        error: { code: "WEBHOOK_NOT_HANDLED", message: "Event recorded for retry" },
+        ...outcome,
+      });
+    }
+
     return reply.send({ received: true, ...outcome });
   });
 }

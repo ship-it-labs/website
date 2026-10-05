@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import crypto from "node:crypto";
+import { planIdFromMembership } from "../src/services/whop-service.js";
 
 /**
  * Whop uses the Standard Webhooks spec. These tests exercise the real signature
@@ -218,5 +219,24 @@ describe("whop environment hosts", () => {
     const { WhopEnvironment } = await import("@whop/sdk");
     expect(WhopEnvironment.Sandbox.api).not.toBe(WhopEnvironment.Production.api);
     expect(WhopEnvironment.Sandbox.api).toContain("sandbox");
+  });
+});
+
+describe("membership plan mapping", () => {
+  // Plus no longer exists as a row: writing it would 401 every request for
+  // the account, so stale metadata normalizes to its surviving equivalent.
+  it("maps retired plus metadata to ultra", () => {
+    expect(planIdFromMembership({ plan_id: "plus" }, null)).toBe("ultra");
+  });
+
+  it("passes live plan ids through untouched", () => {
+    expect(planIdFromMembership({ plan_id: "pro" }, null)).toBe("pro");
+    expect(planIdFromMembership({ plan_id: "ultra" }, "free")).toBe("ultra");
+  });
+
+  it("falls back when metadata carries no plan", () => {
+    expect(planIdFromMembership({}, "free")).toBe("free");
+    expect(planIdFromMembership({}, null)).toBeNull();
+    expect(planIdFromMembership({ plan_id: 42 }, "free")).toBe("free");
   });
 });

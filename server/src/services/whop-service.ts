@@ -298,7 +298,7 @@ const PLAN_FOR_STATUS: Record<string, string | null> = {
  * the row is gone. Ultra is the surviving equivalent, matching the merge the
  * migration applied to stored rows.
  */
-function planIdFromMembership(
+export function planIdFromMembership(
   metadata: Record<string, unknown>,
   fallback: string | null
 ): string | null {
@@ -400,7 +400,13 @@ export async function handleWebhookEvent(
     }
   }
 
-  await supabase.from("subscriptions").upsert(
+  // The plan must never move without its backing subscription row: a stored
+  // plan with no row bills nothing, shows nothing, and counts nowhere — MRR 0,
+  // billing page Free, dashboard paid. That exact split-brain happened when an
+  // upsert failed silently here, so a failed write aborts the whole event and
+  // returns handled:false (the route turns that into a 500 and Whop retries)
+  // instead of half-applying it.
+  const { error: upsertError } = await supabase.from("subscriptions").upsert(
     {
       user_id: userId,
       plan_id: planId ?? "free",
@@ -413,6 +419,14 @@ export async function handleWebhookEvent(
     },
     { onConflict: "user_id" }
   );
+
+  if (upsertError) {
+    logger.error(
+      { err: upsertError, userId, eventId: event.id },
+      "Failed to store subscription; plan left untouched"
+    );
+    return { handled: false, duplicate: false };
+  }
 
   await supabase
     .from("users")

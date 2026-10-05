@@ -6,6 +6,11 @@ import { requireAdmin } from "../middleware/require-admin.js";
 import { callOrchestrator } from "../services/orchestrator-client.js";
 import { OrchestratorError } from "../routes/runtimes.js";
 import { getPlan, getAllPlans } from "../services/plan-service.js";
+import {
+  retrieveMembership,
+  planIdFromMembership,
+} from "../services/whop-service.js";
+import { collectDiagnostics } from "../services/diagnostics.js";
 import { getCurrentPeriod } from "../services/quota-service.js";
 import { isAdminUser } from "../services/admin.js";
 import { logger } from "../utils/logger.js";
@@ -119,8 +124,15 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authenticateApiKey);
   app.addHook("preHandler", requireAdmin);
 
-  app.get("/admin/overview", async (req, reply) => {
-    const [{ data: users }, { data: builds }, capacity] = await Promise.all([
+  // Configuration self-check: presence booleans only, never secret values.
+  // The common "it works locally but not on the deploy" class of failures is
+  // always a missing env var, and reading Render's env list over screenshots
+  // is slower than asking the deployment itself.
+  app.get("/admin/diagnostics", async (_req, reply) => {
+    return reply.send(await collectDiagnostics());
+  });
+
+  app.get("/admin/overview", async (req, reply) => {    const [{ data: users }, { data: builds }, capacity] = await Promise.all([
       supabase.from("users").select("id, plan_id"),
       supabase.from("builds").select("id, status, created_at").order("created_at", { ascending: false }).limit(200),
       agentCapacity(),
@@ -497,8 +509,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ success: true });
   });
 
-  app.get("/admin/payments", async (req, reply) => {
-    const [{ data: subs }, { data: plans }, { data: events }] = await Promise.all([
+  app.get("/admin/payments", async (req, reply) => {    const [{ data: subs }, { data: plans }, { data: events }] = await Promise.all([
       supabase.from("subscriptions").select("user_id, plan_id, status, current_period_end, cancel_at_period_end, updated_at").order("updated_at", { ascending: false }).limit(500),
       supabase.from("plans").select("id, name, price_cents"),
       supabase.from("webhook_events").select("event_type, created_at, processed").eq("provider", "whop").order("created_at", { ascending: false }).limit(30),
@@ -626,5 +637,106 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
         runtime_hours: Math.round((Object.values(runtimeSeconds).reduce((n, v) => n + v, 0) / 3600) * 10) / 10,
       },
     });
+  });
+
+  app.post("/admin/subscriptions/attach", async (req, reply) => {
+    const parsed = z
+      .object({
+        user_email: z.string().trim().email().max(254).optional(),
+        user_id: z.string().min(1).max(64).optional(),
+        whop_membership_id: z.string().trim().min(1).max(64),
+      })
+      .refine((value) => value.user_email || value.user_id, {
+        message: "Provide user_email or user_id",
+      })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: { code: "VALIDATION_ERROR", message: parsed.error.issues[0]?.message ?? "Invalid request" },
+      });
+    }
+
+    const { user_email, user_id, whop_membership_id } = parsed.data;
+
+    const lookupColumn = user_email ? "email" : "id";
+    const lookupValue = user_email ? user_email.toLowerCase() : user_id!;
+    const { data: user } = await supabase
+      .from("users")
+      .select("id, email")
+      .eq(lookupColumn, lookupValue)
+      .single();
+
+    const account = user as { id: string; email: string } | null;
+    if (!account) {
+      return reply.status(404).send({
+        error: { code: "USER_NOT_FOUND", message: "No account matches" },
+      });
+    }
+
+    let membership;
+    try {
+      membership = await retrieveMembership(whop_membership_id);
+    } catch (err) {
+      logger.warn({ err, whop_membership_id }, "Admin attach could not read membership");
+      return reply.status(502).send({
+        error: { code: "WHOP_UNREACHABLE", message: "Could not read that membership from Whop" },
+      });
+    }
+
+    // A membership carrying another account's id refuses to attach: without
+    // this, a pasted id could move anyone's payment onto anyone's account.
+    // Memberships with no embedded id attach on the admin's explicit say-so.
+    const embedded = membership.metadata?.user_id;
+    if (typeof embedded === "string" && embedded && embedded !== account.id) {
+      return reply.status(409).send({
+        error: { code: "MEMBERSHIP_OWNED", message: "That membership belongs to a different account" },
+      });
+    }
+
+    const planId = planIdFromMembership(membership.metadata ?? {}, null);
+    if (!planId || !(await getPlan(planId))) {
+      return reply.status(400).send({
+        error: { code: "UNKNOWN_PLAN", message: "That membership names no known plan" },
+      });
+    }
+
+    const liveStatus = String(membership.status ?? "").toLowerCase();
+    if (["canceled", "expired", "deactivated", "completed"].includes(liveStatus)) {
+      return reply.status(400).send({
+        error: { code: "MEMBERSHIP_DEAD", message: `That membership is ${liveStatus}, not billable` },
+      });
+    }
+    const status = membership.cancel_at_period_end ? "canceled" : "active";
+
+    const now = new Date().toISOString();
+    const { error } = await supabase.from("subscriptions").upsert(
+      {
+        user_id: account.id,
+        plan_id: planId,
+        whop_membership_id: membership.id,
+        whop_plan_id: membership.plan_id,
+        status,
+        current_period_end: membership.current_period_end ?? null,
+        cancel_at_period_end: membership.cancel_at_period_end ?? false,
+        updated_at: now,
+      },
+      { onConflict: "user_id" }
+    );
+    if (error) {
+      return reply.status(500).send({
+        error: { code: "INTERNAL_ERROR", message: "Could not store the subscription" },
+      });
+    }
+
+    await supabase
+      .from("users")
+      .update({ plan_id: planId })
+      .eq("id", account.id);
+
+    logger.info(
+      { admin: req.auth!.userId, userId: account.id, membershipId: membership.id, planId },
+      "Admin attached Whop membership"
+    );
+    return reply.send({ success: true, plan_id: planId, status });
   });
 }
