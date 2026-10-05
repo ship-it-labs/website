@@ -277,6 +277,21 @@ create table if not exists user_preferences (
   updated_at text not null default (datetime('now'))
 );
 
+-- Deployment configuration owned by the admin panel instead of the shell.
+-- Each key holds a development value and a production value; the deployment
+-- applies the column matching its active configuration on boot and refreshes
+-- it periodically, so rotating a secret is an admin click, not a redeploy.
+-- Boot-identity values (database credentials, ports, paths, NODE_ENV itself)
+-- are deliberately absent here: the database cannot configure how to reach
+-- the database.
+create table if not exists env_overrides (
+  key text not null,
+  environment text not null check (environment in ('development', 'production')),
+  value text not null,
+  updated_at text not null default (datetime('now')),
+  primary key (key, environment)
+);
+
 create table if not exists server_agents (
   id text primary key,
   manager_id text,

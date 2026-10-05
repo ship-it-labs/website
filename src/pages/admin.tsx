@@ -9,6 +9,7 @@ import {
 } from "@/components/site/DashboardLayout";
 import { BuildLogViewer } from "@/components/site/BuildLogViewer";
 import { LeaseCountdown, useNow } from "@/components/site/LeaseCountdown";
+import { EnvironmentSection } from "@/components/site/EnvironmentSection";
 
 interface Overview {
   users: { total: number; by_plan: Record<string, number> };
@@ -67,7 +68,7 @@ interface Plan {
   previous_price_cents: number | null;
 }
 
-type Section = "overview" | "users" | "runtimes" | "builds" | "payments" | "analytics" | "plans" | "settings";
+type Section = "overview" | "users" | "runtimes" | "builds" | "payments" | "analytics" | "plans" | "settings" | "environment";
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -78,6 +79,7 @@ const SECTIONS: { id: Section; label: string }[] = [
   { id: "analytics", label: "Analytics" },
   { id: "plans", label: "Plans" },
   { id: "settings", label: "Settings" },
+  { id: "environment", label: "Environment" },
 ];
 
 export function AdminPage() {
@@ -126,6 +128,8 @@ export function AdminPage() {
       {section === "analytics" && <AnalyticsSection onError={setError} />}
       {section === "plans" && <PlansSection onError={setError} />}
       {section === "settings" && <SettingsSection onError={setError} />}
+      {section === "environment" && <EnvironmentSection onError={setError} />}
+      {section === "environment" && <EnvironmentSection onError={setError} />}
     </DashboardLayout>
   );
 }

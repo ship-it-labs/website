@@ -10,6 +10,11 @@ import {
   retrieveMembership,
   planIdFromMembership,
 } from "../services/whop-service.js";
+import {
+  MANAGED_ENV_KEYS,
+  isManagedKey,
+  loadEnvOverrides,
+} from "../services/runtime-env.js";
 import { collectDiagnostics } from "../services/diagnostics.js";
 import { getCurrentPeriod } from "../services/quota-service.js";
 import { isAdminUser } from "../services/admin.js";
@@ -22,8 +27,8 @@ import { logger } from "../utils/logger.js";
  * is registered once for the whole plugin rather than per route.
  */
 
-const MANAGER_URL = process.env.SERVER_MANAGER_URL || "http://manager:3001";
-const MANAGER_SECRET = process.env.ORCHESTRATOR_SECRET || "";
+const managerUrl = () => process.env.SERVER_MANAGER_URL || "http://manager:3001";
+const managerSecret = () => process.env.ORCHESTRATOR_SECRET || "";
 
 interface AgentInfo {
   agent_id?: string;
@@ -39,14 +44,15 @@ async function agentCapacity(): Promise<{
   total_used: number;
   total_max: number;
 } | null> {
-  if (!MANAGER_SECRET) return null;
+  const secret = managerSecret();
+  if (!secret) return null;
 
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 8000);
     try {
-      const response = await fetch(`${MANAGER_URL}/api/v1/agents/online`, {
-        headers: { "x-service-secret": MANAGER_SECRET },
+      const response = await fetch(`${managerUrl()}/api/v1/agents/online`, {
+        headers: { "x-service-secret": secret },
         signal: controller.signal,
       });
       if (!response.ok) return null;
@@ -94,7 +100,7 @@ const settingsSchema = z.record(z.string().min(1).max(64), z.unknown());
 
 /** Setting keys the admin panel may write. Anything else is refused so a typo
  * cannot plant a dead key that looks configured but does nothing. */
-const KNOWN_SETTINGS = new Set(["signups_enabled", "build_executor"]);
+const KNOWN_SETTINGS = new Set(["signups_enabled", "build_executor", "config_environment"]);
 
 function readSettingValue(value: unknown): unknown {
   if (typeof value !== "string") return value;
@@ -489,6 +495,18 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
           error: { code: "UNKNOWN_SETTING", message: `Unknown setting: ${key}` },
         });
       }
+      // A typo here would silently pin the deployment to one column with no
+      // visible error, so the only accepted values are enumerated.
+      if (
+        key === "config_environment" &&
+        value !== "auto" &&
+        value !== "development" &&
+        value !== "production"
+      ) {
+        return reply.status(400).send({
+          error: { code: "VALIDATION_ERROR", message: "config_environment must be auto, development or production" },
+        });
+      }
     }
 
     for (const [key, value] of Object.entries(parsed.data)) {
@@ -506,6 +524,110 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     }
 
     logger.info({ admin: req.auth!.userId, settings: parsed.data }, "Admin changed settings");
+
+    // Switching columns takes effect on the next refresh; do it now so the
+    // admin sees the result of the flip instead of waiting a minute.
+    if ("config_environment" in parsed.data) {
+      await loadEnvOverrides();
+    }
+
+    return reply.send({ success: true });
+  });
+
+  app.get("/admin/env", async (req, reply) => {
+    const { data } = await supabase
+      .from("env_overrides")
+      .select("key, environment, updated_at");
+
+    const setKeys = new Set(
+      ((data ?? []) as { key: string; environment: string }[]).map(
+        (row) => `${row.key}:${row.environment}`
+      )
+    );
+
+    // Values are never returned: presence is the whole diagnosis, and a value
+    // on this response would land in browser history, logs and screenshots.
+    return reply.send({
+      keys: MANAGED_ENV_KEYS.map((entry) => ({
+        ...entry,
+        development_set: setKeys.has(`${entry.key}:development`),
+        production_set: setKeys.has(`${entry.key}:production`),
+        shell_set: (process.env[entry.key] ?? "").trim().length > 0,
+      })),
+      active: await getSetting<unknown>("config_environment", "auto"),
+      runtime_mode: process.env.NODE_ENV === "production" ? "production" : "development",
+    });
+  });
+
+  app.put("/admin/env", async (req, reply) => {
+    const parsed = z
+      .object({
+        key: z.string().min(1).max(64),
+        environment: z.enum(["development", "production"]),
+        // Empty clears back to the shell value. Absent is a caller error, not
+        // a clear, so accidental {} bodies cannot wipe configuration.
+        value: z.string().max(4000),
+      })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: { code: "VALIDATION_ERROR", message: parsed.error.issues[0]?.message ?? "Invalid request" },
+      });
+    }
+
+    const { key, environment, value } = parsed.data;
+    if (!isManagedKey(key)) {
+      return reply.status(400).send({
+        error: {
+          code: "UNKNOWN_KEY",
+          message: "That key is not manageable here. Boot-identity values stay in the shell.",
+        },
+      });
+    }
+
+    // Explicit select-then-write rather than upsert: the local SQLite stand-in
+    // only understands single-column conflict targets, and a composite target
+    // would generate invalid SQL there while working on Postgres.
+    if (value.trim() === "") {
+      const { error } = await supabase
+        .from("env_overrides")
+        .delete()
+        .eq("key", key)
+        .eq("environment", environment);
+      if (error) {
+        return reply.status(500).send({
+          error: { code: "INTERNAL_ERROR", message: "Could not clear the value" },
+        });
+      }
+    } else {
+      const { data: existing } = await supabase
+        .from("env_overrides")
+        .select("key")
+        .eq("key", key)
+        .eq("environment", environment)
+        .single();
+
+      const row = {
+        key,
+        environment,
+        value: value.trim(),
+        updated_at: new Date().toISOString(),
+      };
+      const { error } = existing
+        ? await supabase.from("env_overrides").update(row).eq("key", key).eq("environment", environment)
+        : await supabase.from("env_overrides").insert(row);
+      if (error) {
+        return reply.status(500).send({
+          error: { code: "INTERNAL_ERROR", message: "Could not save the value" },
+        });
+      }
+    }
+
+    // Apply now rather than at the next minute tick: the admin just changed
+    // this and will immediately test it.
+    await loadEnvOverrides();
+
+    logger.info({ admin: req.auth!.userId, key, environment, cleared: value.trim() === "" }, "Admin changed env override");
     return reply.send({ success: true });
   });
 

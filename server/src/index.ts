@@ -33,6 +33,7 @@ import { billingRoutes, webhookRoutes } from "./routes/billing.js";
 import { websocketRoutes } from "./websockets/index.js";
 import { startLeaseExpiryWorker } from "./services/usage-worker.js";
 import { seedPlans } from "./services/plan-service.js";
+import { loadEnvOverrides } from "./services/runtime-env.js";
 
 const PORT = parseInt(process.env.PORT || "3000", 10);
 const HOST = process.env.HOST || "0.0.0.0";
@@ -179,6 +180,16 @@ if (fs.existsSync(FRONTEND_DIST)) {
 }
 
 seedPlans().catch((err) => logger.error({ err }, "Failed to seed plans"));
+
+// DB-managed configuration lands in process.env before anything serves, so the
+// first request already sees admin-set values. Refreshes every minute after
+// that: rotating a secret is an admin click, and the new value flows in
+// without a restart (every reader resolves per call).
+await loadEnvOverrides();
+setInterval(() => {
+  loadEnvOverrides().catch((err) => logger.error({ err }, "Failed to refresh configuration"));
+}, 60_000);
+
 startLeaseExpiryWorker();
 // Collects the outcome of builds running inside the platform's own runtime, so
 // their status and logs reach the dashboard.

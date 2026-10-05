@@ -3,8 +3,11 @@ import { Build } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 import { v4 as uuidv4 } from "uuid";
 
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
-const GITHUB_REPO = process.env.GITHUB_REPO || "Ship-it-labs/opencode-plugin";
+// Read per call, not captured at import: the admin panel can rotate these
+// values into process.env at runtime, and a captured constant would stay stale
+// until the next restart.
+const githubToken = () => process.env.GITHUB_TOKEN || "";
+const githubRepo = () => process.env.GITHUB_REPO || "Ship-it-labs/opencode-plugin";
 
 export async function createBuild(
   userId: string,
@@ -86,11 +89,11 @@ export async function triggerGitHubActionsBuild(buildId: string): Promise<void> 
 
   try {
     const resp = await fetch(
-      `https://api.github.com/repos/${GITHUB_REPO}/actions/workflows/build.yml/dispatches`,
+      `https://api.github.com/repos/${githubRepo()}/actions/workflows/build.yml/dispatches`,
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${GITHUB_TOKEN}`,
+          Authorization: `Bearer ${githubToken()}`,
           Accept: "application/vnd.github.v3+json",
         },
         body: JSON.stringify({

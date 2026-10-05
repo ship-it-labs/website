@@ -174,7 +174,7 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
   });
 }
 
-const GITHUB_REPO = process.env.GITHUB_REPO || "Ship-it-labs/opencode-plugin";
+const githubRepo = () => process.env.GITHUB_REPO || "Ship-it-labs/opencode-plugin";
 
 /**
  * A link to the GitHub run behind a build, when there is one. Builds executed by
@@ -184,7 +184,7 @@ function withRunUrl(build: Build) {
   return {
     ...build,
     github_run_url: build.workflow_run_id
-      ? `https://github.com/${GITHUB_REPO}/actions/runs/${build.workflow_run_id}`
+      ? `https://github.com/${githubRepo()}/actions/runs/${build.workflow_run_id}`
       : null,
   };
 }
