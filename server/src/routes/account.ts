@@ -53,7 +53,7 @@ function bearerToken(req: FastifyRequest): string {
  * callers branch on usingSqlite first, so reaching here with the local driver
  * is a programming error, not a runtime case.
  */
-function supabaseAdmin() {
+export function supabaseAdmin() {
   return (
     supabase.auth as unknown as {
       admin: {

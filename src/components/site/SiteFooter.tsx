@@ -25,7 +25,11 @@ export function SiteFooter() {
             title="Resources"
             links={[
               { label: "Documentation", to: "/docs" },
+              { label: "FAQ", to: "/faq" },
+              { label: "Changelog", to: "/changelog" },
+              { label: "Status", to: "/status" },
               { label: "Terms of Service", to: "/terms" },
+              { label: "Privacy Policy", to: "/privacy" },
               { label: "Sign in", to: "/login" },
             ]}
           />
@@ -35,6 +39,7 @@ export function SiteFooter() {
               { label: "Create account", to: "/signup" },
               { label: "API keys", to: "/dashboard/keys" },
               { label: "Billing", to: "/dashboard/billing" },
+              { label: "Contact support", to: "/contact" },
             ]}
           />
         </div>

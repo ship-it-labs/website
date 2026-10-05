@@ -4,6 +4,7 @@ import { generateApiKey } from "../utils/api-key.js";
 import { seedPlans } from "../services/plan-service.js";
 import { BOOTSTRAP_ADMIN_EMAIL } from "../services/admin.js";
 import { recordSession, hashSessionToken } from "../services/sessions.js";
+import { supabaseAdmin } from "./account.js";
 import { getSetting } from "./admin.js";
 import { logger } from "../utils/logger.js";
 
@@ -239,6 +240,60 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
+    return reply.send({ success: true });
+  });
+
+  // Completes a password reset from the email link. The link carries a
+  // recovery token, not a session, so this route stays outside the API-key
+  // middleware: the recovery token itself is the credential, verified below.
+  // Local development has no email delivery, so the link never exists there
+  // and this endpoint has nothing to complete.
+  app.post("/auth/reset-confirm", async (req, reply) => {
+    const { recovery_token, new_password } = req.body as {
+      recovery_token?: string;
+      new_password?: string;
+    };
+
+    if (!recovery_token || !new_password || new_password.length < 8) {
+      return reply.status(400).send({
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "A valid recovery link and an 8+ character password are required",
+        },
+      });
+    }
+
+    if (usingSqlite) {
+      return reply.status(400).send({
+        error: {
+          code: "RESET_UNAVAILABLE",
+          message: "Password reset links are not sent in local development. Change the password from Settings instead.",
+        },
+      });
+    }
+
+    const { data, error } = await supabase.auth.getUser(recovery_token);
+    if (error || !data?.user?.id) {
+      return reply.status(400).send({
+        error: {
+          code: "INVALID_LINK",
+          message: "This reset link is invalid or has expired. Request a new one.",
+        },
+      });
+    }
+
+    const admin = supabaseAdmin();
+    const { error: updateError } = await admin.updateUserById(data.user.id, {
+      password: new_password,
+    });
+
+    if (updateError) {
+      return reply.status(500).send({
+        error: { code: "INTERNAL_ERROR", message: "Could not set the new password" },
+      });
+    }
+
+    logger.info({ userId: data.user.id }, "Password reset completed");
     return reply.send({ success: true });
   });
 }

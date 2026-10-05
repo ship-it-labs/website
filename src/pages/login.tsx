@@ -6,13 +6,12 @@ import {
   AuthLink,
   ErrorNote,
   Field,
-  GhostButton,
   PrimaryButton,
   SuccessNote,
 } from "@/components/site/AuthLayout";
 
 export function LoginPage() {
-  const { signIn, resetPassword } = useAuth();
+  const { signIn } = useAuth();
   const navigate = useNavigate();
 
   const [email, setEmail] = useState("");
@@ -33,21 +32,6 @@ export function LoginPage() {
       setError(err instanceof Error ? err.message : "Sign in failed");
     } finally {
       setBusy(false);
-    }
-  }
-
-  async function onReset() {
-    if (!email) {
-      setError("Enter your email address first");
-      return;
-    }
-    setError(null);
-    setNotice(null);
-    try {
-      await resetPassword(email);
-      setNotice("If that address is registered, a reset link is on its way.");
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not send a reset link");
     }
   }
 
@@ -86,7 +70,10 @@ export function LoginPage() {
         {notice && <SuccessNote>{notice}</SuccessNote>}
 
         <PrimaryButton busy={busy}>Sign in</PrimaryButton>
-        <GhostButton onClick={onReset}>Send a reset link</GhostButton>
+        <p className="mt-4 text-center text-xs text-zinc-500">
+          Forgot your password?{" "}
+          <AuthLink to="/forgot-password">Reset it</AuthLink>
+        </p>
       </form>
     </AuthLayout>
   );

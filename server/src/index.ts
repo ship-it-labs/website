@@ -26,6 +26,7 @@ assertUrlsConfigured();
 import { buildRoutes } from "./routes/builds.js";
 import { buildReportRoutes } from "./routes/build-reports.js";
 import { adminRoutes } from "./routes/admin.js";
+import { statusRoutes } from "./routes/status.js";
 import { projectRoutes } from "./routes/projects.js";
 import { runtimeRoutes } from "./routes/runtimes.js";
 import { billingRoutes, webhookRoutes } from "./routes/billing.js";
@@ -104,6 +105,9 @@ await app.register(buildReportRoutes, { prefix: "/api/v1" });
 // Admin routes guard themselves twice: authenticateApiKey, then requireAdmin.
 // The pair is registered once for the whole plugin so no route can forget it.
 await app.register(adminRoutes, { prefix: "/api/v1" });
+// Public and deliberately coarse: the status page renders from here, and a
+// status endpoint that requires a login is a contradiction.
+await app.register(statusRoutes, { prefix: "/api/v1" });
 await app.register(projectRoutes, { prefix: "/api/v1" });
 await app.register(runtimeRoutes, { prefix: "/api/v1" });
 await app.register(billingRoutes, { prefix: "/api/v1" });

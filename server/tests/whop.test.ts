@@ -7,11 +7,11 @@ import crypto from "node:crypto";
  * Whop credentials.
  */
 
-const SECRET = Buffer.from("whop-sandbox-test-secret").toString("base64");
+const SECRET = "whop-sandbox-test-secret";
 
 function sign(body: string, id: string, timestamp: string): string {
   const digest = crypto
-    .createHmac("sha256", Buffer.from(SECRET, "base64"))
+    .createHmac("sha256", Buffer.from(SECRET, "utf8"))
     .update(`${id}.${timestamp}.${body}`)
     .digest("base64");
   return `v1,${digest}`;

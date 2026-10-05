@@ -8,6 +8,12 @@ import { DashboardPage } from "@/pages/dashboard";
 import { ApiKeysPage } from "@/pages/api-keys";
 import { BillingPage } from "@/pages/billing";
 import { SettingsPage } from "@/pages/settings";
+import { PrivacyPage } from "@/pages/privacy";
+import { FaqPage } from "@/pages/faq";
+import { ContactPage } from "@/pages/contact";
+import { ChangelogPage } from "@/pages/changelog";
+import { StatusPage } from "@/pages/status";
+import { ForgotPasswordPage, ResetPasswordPage } from "@/pages/password";
 import { AdminPage } from "@/pages/admin";
 import { HomePage } from "@/pages/home";
 import { PricingPage } from "@/pages/pricing";
@@ -39,6 +45,13 @@ export function App() {
       <Route path="/terms" element={<TermsPage />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/signup" element={<SignupPage />} />
+      <Route path="/forgot-password" element={<ForgotPasswordPage />} />
+      <Route path="/reset-password" element={<ResetPasswordPage />} />
+      <Route path="/privacy" element={<PrivacyPage />} />
+      <Route path="/faq" element={<FaqPage />} />
+      <Route path="/contact" element={<ContactPage />} />
+      <Route path="/changelog" element={<ChangelogPage />} />
+      <Route path="/status" element={<StatusPage />} />
       <Route
         path="/dashboard"
         element={
