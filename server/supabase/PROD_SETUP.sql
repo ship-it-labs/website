@@ -1,5 +1,5 @@
 -- PRODUCTION BOOTSTRAP: paste this whole file into Supabase Dashboard > SQL Editor and run once.
--- Idempotent: every statement tolerates re-runs. Order matters (0001 first, 0009 last).
+-- Idempotent: every statement tolerates re-runs. Order matters.
 
 -- ============================================================================
 -- migrations/0001_initial_schema.sql
@@ -428,5 +428,19 @@ create table if not exists public.user_preferences (
   email_notifications boolean not null default true,
   theme text not null default 'dark',
   updated_at timestamptz not null default now()
+);
+;
+-- ============================================================================
+-- migrations/0010_env_overrides.sql
+-- ============================================================================
+-- Deployment configuration owned by the admin panel. Each key holds a
+-- development value and a production value; the deployment applies the column
+-- matching its active configuration on boot and refreshes it periodically.
+create table if not exists public.env_overrides (
+  key text not null,
+  environment text not null check (environment in ('development', 'production')),
+  value text not null,
+  updated_at timestamptz not null default now(),
+  primary key (key, environment)
 );
 ;
