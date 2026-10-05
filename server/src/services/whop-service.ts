@@ -289,6 +289,20 @@ const PLAN_FOR_STATUS: Record<string, string | null> = {
 };
 
 /**
+ * True when a write failed because the row already exists, on either driver.
+ * Postgres reports code 23505; SQLite reports no code at all, just a
+ * "UNIQUE constraint failed" message. Checking only 23505 meant every Whop
+ * retry on SQLite fell into the error branch, 500'd, and triggered another
+ * retry — an infinite storm of duplicates that were never duplicates.
+ */
+export function isDuplicateKeyError(error: { code?: string; message?: string } | null | undefined): boolean {
+  if (!error) return false;
+  if (error.code === "23505") return true;
+  const message = error.message ?? "";
+  return /unique constraint failed/i.test(message) || /duplicate key value/i.test(message);
+}
+
+/**
  * Maps a Whop membership onto a local plan id. The plan id travels in the
  * membership metadata that was attached at checkout, so no reverse lookup
  * against Whop's plan catalogue is needed.
@@ -336,12 +350,30 @@ export async function handleWebhookEvent(
   });
 
   if (insertError) {
-    if (insertError.code === "23505") {
+    if (!isDuplicateKeyError(insertError)) {
+      logger.error({ err: insertError, eventId: event.id }, "Failed to record webhook");
+      return { handled: false, duplicate: false };
+    }
+
+    // Seen before — but "seen" is not "finished". A crash between recording
+    // and completing leaves a processed:false row, and blindly ignoring the
+    // retry would lose the payment forever. Resume those; ignore the rest.
+    const { data: prior } = await supabase
+      .from("webhook_events")
+      .select("processed")
+      .eq("idempotency_key", event.id)
+      .single();
+
+    const finished =
+      (prior as { processed?: boolean | number | null } | null)?.processed === true ||
+      (prior as { processed?: boolean | number | null } | null)?.processed === 1;
+
+    if (finished) {
       logger.info({ eventId: event.id, type: event.type }, "Duplicate webhook ignored");
       return { handled: true, duplicate: true };
     }
-    logger.error({ err: insertError, eventId: event.id }, "Failed to record webhook");
-    return { handled: false, duplicate: false };
+
+    logger.info({ eventId: event.id, type: event.type }, "Resuming unfinished webhook delivery");
   }
 
   const membership = event.data as unknown as WhopMembership;

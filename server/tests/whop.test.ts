@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import crypto from "node:crypto";
-import { planIdFromMembership } from "../src/services/whop-service.js";
+import { planIdFromMembership, isDuplicateKeyError } from "../src/services/whop-service.js";
 
 /**
  * Whop uses the Standard Webhooks spec. These tests exercise the real signature
@@ -238,5 +238,25 @@ describe("membership plan mapping", () => {
     expect(planIdFromMembership({}, "free")).toBe("free");
     expect(planIdFromMembership({}, null)).toBeNull();
     expect(planIdFromMembership({ plan_id: 42 }, "free")).toBe("free");
+  });
+});
+
+describe("duplicate delivery detection", () => {
+  // Whop retries deliveries, and the retry must be recognized on both
+  // drivers: Postgres reports code 23505, SQLite reports a bare message.
+  // Missing the SQLite shape once caused an infinite retry storm.
+  it("recognizes Postgres unique violations", () => {
+    expect(isDuplicateKeyError({ code: "23505", message: "duplicate key value violates unique constraint" })).toBe(true);
+  });
+
+  it("recognizes SQLite unique violations", () => {
+    expect(isDuplicateKeyError({ message: "UNIQUE constraint failed: webhook_events.idempotency_key" })).toBe(true);
+  });
+
+  it("rejects anything else", () => {
+    expect(isDuplicateKeyError(null)).toBe(false);
+    expect(isDuplicateKeyError(undefined)).toBe(false);
+    expect(isDuplicateKeyError({ code: "23503", message: "insert violates foreign key" })).toBe(false);
+    expect(isDuplicateKeyError({ message: "connection refused" })).toBe(false);
   });
 });
