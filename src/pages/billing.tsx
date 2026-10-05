@@ -6,6 +6,7 @@ import {
   EmptyState,
 } from "@/components/site/DashboardLayout";
 import { Modal } from "@/components/site/Modal";
+import { PromoNote } from "@/components/site/PromoBanner";
 import { cn } from "@/lib/utils";
 
 interface Plan {
@@ -245,7 +246,9 @@ export function BillingPage() {
           <EmptyState>Plans could not be loaded. Try again in a moment.</EmptyState>
         </Panel>
       ) : (
-        <div className="grid gap-5 md:grid-cols-3">
+        <>
+          <PromoNote className="mb-6" />
+          <div className="grid gap-5 md:grid-cols-3">
           {plans.map((plan) => {
             const action = actionFor(plan, subscription);
             return (
@@ -321,7 +324,8 @@ export function BillingPage() {
               </article>
             );
           })}
-        </div>
+          </div>
+        </>
       )}
 
       {downgradeTarget && subscription && (

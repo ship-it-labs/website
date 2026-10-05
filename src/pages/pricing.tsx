@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
+import { PromoBanner } from "@/components/site/PromoBanner";
 import { cn } from "@/lib/utils";
 import { SiteNav } from "@/components/site/SiteNav";
 import { SiteFooter } from "@/components/site/SiteFooter";
@@ -131,6 +132,10 @@ export function PricingPage() {
                 Annual
               </button>
             </div>
+          </div>
+
+          <div className="mx-auto mt-10 max-w-3xl">
+            <PromoBanner />
           </div>
 
             <div className="mt-16 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">

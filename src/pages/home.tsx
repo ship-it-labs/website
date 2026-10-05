@@ -4,7 +4,9 @@ import { AuroraBackground } from "@/components/site/AuroraBackground";
 import { GlowCta, GhostCta } from "@/components/site/GlowCta";
 import { Reveal } from "@/components/site/Reveal";
 import { HeroTexture } from "@/components/site/HeroTexture";
+import { PromoPill } from "@/components/site/PromoBanner";
 import { WrenchIcon, PlayIcon, ShieldIcon } from "@/components/site/FeatureIcon";
+import { useAuth } from "@/lib/auth-context";
 
 const FEATURES = [
   {
@@ -34,6 +36,11 @@ const STEPS = [
 ];
 
 export function HomePage() {
+  // Signed-in visitors get a way back to the product, not a second signup
+  // pitch. The nav already adapts elsewhere; the hero is where it matters.
+  const { user, loading } = useAuth();
+  const signedIn = !loading && !!user;
+
   return (
     <div className="relative min-h-screen bg-zinc-950 text-zinc-100">
       <AuroraBackground />
@@ -81,16 +88,23 @@ export function HomePage() {
               className="stagger mt-10 flex flex-col gap-3 sm:flex-row sm:items-center"
               style={{ "--i": 3 } as React.CSSProperties}
             >
-              <GlowCta to="/signup">Start building free</GlowCta>
+              {signedIn ? (
+                <GlowCta to="/dashboard">Go to dashboard</GlowCta>
+              ) : (
+                <GlowCta to="/signup">Start building free</GlowCta>
+              )}
               <GhostCta to="/docs">Read the docs</GhostCta>
             </div>
 
-            <p
-              className="stagger mt-6 text-sm text-zinc-600"
+            <div
+              className="stagger mt-6 flex flex-col items-start gap-3"
               style={{ "--i": 4 } as React.CSSProperties}
             >
-              24 runtime hours a month on the free plan. No card required.
-            </p>
+              <p className="text-sm text-zinc-600">
+                10 runtime hours a month on the free plan. No card required.
+              </p>
+              <PromoPill />
+            </div>
             </div>
 
             {/* Decorative only, so it is hidden from assistive technology and
@@ -167,14 +181,18 @@ export function HomePage() {
                   className="pointer-events-none absolute -top-24 left-1/2 h-64 w-[36rem] -translate-x-1/2 rounded-full bg-violet-500/25 blur-[100px]"
                 />
                 <h2 className="relative font-serif text-4xl font-bold tracking-tight text-white sm:text-5xl">
-                  Start with 24 hours free.
+                  Start with 10 hours free.
                 </h2>
                 <p className="relative mx-auto mt-5 max-w-lg text-[15px] leading-relaxed text-zinc-400">
                   Enough to build something real and keep it running for most of a
                   working day.
                 </p>
                 <div className="relative mt-9 flex justify-center">
-                  <GlowCta to="/signup">Create an account</GlowCta>
+                  {signedIn ? (
+                    <GlowCta to="/dashboard">Go to dashboard</GlowCta>
+                  ) : (
+                    <GlowCta to="/signup">Create an account</GlowCta>
+                  )}
                 </div>
               </div>
             </Reveal>
