@@ -170,6 +170,9 @@ export interface WhopMembership {
   metadata: Record<string, unknown>;
   cancel_at_period_end: boolean;
   current_period_end: string | null;
+  // Whop-hosted page where the customer manages the membership themselves,
+  // including cancellation and plan changes. Null when no member record exists.
+  manage_url?: string | null;
 }
 
 export async function retrieveMembership(membershipId: string): Promise<WhopMembership> {
@@ -368,6 +371,34 @@ export async function handleWebhookEvent(
     desiredStatus === "active"
       ? (membership.cancel_at_period_end ? "canceled" : "active")
       : desiredStatus;
+
+  // One billing membership per user. A new activation naming a different
+  // membership than the stored row means the customer switched tiers, and the
+  // old membership keeps billing until someone stops it — which used to be
+  // nobody, so upgrading double-charged. Cancel the old one at period end so
+  // paid days are never taken away early. Renewals carry the same membership
+  // id and skip this entirely; cleanup never fails the webhook itself.
+  if (desiredStatus === "active" && planId && membership.id) {
+    try {
+      const { data: existing } = await supabase
+        .from("subscriptions")
+        .select("whop_membership_id, status")
+        .eq("user_id", userId)
+        .single();
+
+      const oldId = (existing as { whop_membership_id?: string; status?: string } | null)?.whop_membership_id;
+      const oldStatus = (existing as { whop_membership_id?: string; status?: string } | null)?.status;
+      if (oldId && oldId !== membership.id && (oldStatus === "active" || oldStatus === "past_due")) {
+        await cancelMembership(oldId);
+        logger.info(
+          { userId, oldMembershipId: oldId, newMembershipId: membership.id },
+          "Canceled superseded membership after tier change"
+        );
+      }
+    } catch (err) {
+      logger.error({ err, userId }, "Failed to cancel superseded membership");
+    }
+  }
 
   await supabase.from("subscriptions").upsert(
     {

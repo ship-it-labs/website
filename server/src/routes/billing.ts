@@ -3,6 +3,7 @@ import { authenticateApiKey } from "../middleware/auth.js";
 import {
   createCheckout,
   cancelMembership,
+  retrieveMembership,
   validateWhopConfig,
   verifyWebhookSignature,
   handleWebhookEvent,
@@ -84,7 +85,24 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    return reply.send({ subscription: data?.[0] ?? null });
+    const subscription = (data?.[0] ?? null) as Record<string, unknown> | null;
+
+    // Whop's self-serve management page (plan changes, payment method,
+    // cancellation) for the "Manage in Whop" button. Fetched live rather than
+    // stored: it is a URL, not state, and a stale one is worse than none.
+    // Missing means the button hides, never an error.
+    let manageUrl: string | null = null;
+    const membershipId = subscription?.whop_membership_id;
+    if (typeof membershipId === "string" && membershipId) {
+      try {
+        const membership = await retrieveMembership(membershipId);
+        manageUrl = membership.manage_url ?? null;
+      } catch (err) {
+        logger.warn({ err, userId: req.auth!.userId }, "Could not fetch Whop manage URL");
+      }
+    }
+
+    return reply.send({ subscription: subscription ? { ...subscription, manage_url: manageUrl } : null });
   });
 
   app.post("/billing/cancel", { preHandler: authenticateApiKey }, async (req, reply) => {

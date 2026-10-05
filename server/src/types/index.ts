@@ -42,11 +42,13 @@ export interface Subscription {
   id: string;
   user_id: string;
   plan_id: string;
-  whop_subscription_id: string;
-  status: "active" | "canceled" | "past_due" | "trialing";
-  current_period_start: string;
-  current_period_end: string;
-  cancel_at_period_end: boolean;
+  whop_membership_id: string;
+  whop_plan_id?: string | null;
+  // Written values are active, canceled (paid through period end), past_due
+  // and free. trialing is a Whop-side state kept for forward compatibility.
+  status: "active" | "canceled" | "past_due" | "free" | "trialing";
+  current_period_end?: string | null;
+  cancel_at_period_end?: boolean | number | null;
 }
 
 export interface Project {
