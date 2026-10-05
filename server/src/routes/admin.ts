@@ -581,6 +581,45 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
+  app.get("/admin/env/value", async (req, reply) => {
+    const { key, environment } = req.query as { key?: string; environment?: string };
+    if (!key || !isManagedKey(key)) {
+      return reply.status(400).send({
+        error: { code: "UNKNOWN_KEY", message: "That key is not manageable here" },
+      });
+    }
+    if (environment !== "development" && environment !== "production") {
+      return reply.status(400).send({
+        error: { code: "VALIDATION_ERROR", message: "environment must be development or production" },
+      });
+    }
+
+    // On-demand single value, never bulk: only the revealed secret transits,
+    // and every reveal is logged with who and what so the audit trail shows
+    // exactly which secrets were displayed where.
+    const { data } = await supabase
+      .from("env_overrides")
+      .select("value")
+      .eq("key", key)
+      .eq("environment", environment)
+      .single();
+
+    const dbValue = (data as { value?: unknown } | null)?.value;
+    if (typeof dbValue === "string" && dbValue) {
+      logger.info({ admin: req.auth!.userId, key, environment, source: "db" }, "Admin revealed env value");
+      return reply.send({ key, environment, source: "db", value: dbValue });
+    }
+
+    const shellValue = (process.env[key] ?? "").trim();
+    logger.info({ admin: req.auth!.userId, key, environment, source: shellValue ? "shell" : "unset" }, "Admin revealed env value");
+    return reply.send({
+      key,
+      environment,
+      source: shellValue ? "shell" : "unset",
+      value: shellValue || null,
+    });
+  });
+
   app.put("/admin/env", async (req, reply) => {
     const parsed = z
       .object({

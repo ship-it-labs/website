@@ -1,6 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "@/lib/api";
-
 interface EnvKeyState {
   key: string;
   label: string;
@@ -33,6 +32,9 @@ export function EnvironmentSection({ onError }: { onError: (message: string | nu
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmEnv, setConfirmEnv] = useState<string | null>(null);
   const [switching, setSwitching] = useState(false);
+  const [revealed, setRevealed] = useState<Record<string, { value: string | null; source: string }>>({});
+  const [revealing, setRevealing] = useState<string | null>(null);
+  const hideTimer = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -93,6 +95,61 @@ export function EnvironmentSection({ onError }: { onError: (message: string | nu
       onError(err instanceof Error ? err.message : "Could not switch configuration");
     } finally {
       setSwitching(false);
+    }
+  }
+
+  // Revealed secrets hide themselves after 30 seconds and on unmount: a value
+  // left on screen is how secrets end up in screenshots.
+  useEffect(() => {
+    return () => {
+      if (hideTimer.current !== null) window.clearTimeout(hideTimer.current);
+    };
+  }, []);
+
+  function scheduleHide(slot: string) {
+    if (hideTimer.current !== null) window.clearTimeout(hideTimer.current);
+    hideTimer.current = window.setTimeout(() => {
+      setRevealed((current) => {
+        const next = { ...current };
+        delete next[slot];
+        return next;
+      });
+    }, 30_000);
+  }
+
+  async function reveal(key: string, environment: EnvColumn) {
+    const slot = `${key}:${environment}`;
+    setRevealing(slot);
+    try {
+      const out = await api.get<{ value: string | null; source: string }>(
+        `/api/v1/admin/env/value?key=${encodeURIComponent(key)}&environment=${environment}`
+      );
+      setRevealed((current) => ({ ...current, [slot]: out }));
+      scheduleHide(slot);
+      onError(null);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Could not reveal the value");
+    } finally {
+      setRevealing(null);
+    }
+  }
+
+  function hide(slot: string) {
+    if (hideTimer.current !== null) window.clearTimeout(hideTimer.current);
+    setRevealed((current) => {
+      const next = { ...current };
+      delete next[slot];
+      return next;
+    });
+  }
+
+  async function copy(slot: string) {
+    const entry = revealed[slot];
+    if (!entry?.value) return;
+    try {
+      await navigator.clipboard?.writeText(entry.value);
+    } catch {
+      onError("The clipboard refused the copy. Select and copy manually.");
     }
   }
 
@@ -185,8 +242,11 @@ export function EnvironmentSection({ onError }: { onError: (message: string | nu
                 const dbSet = environment === "development" ? entry.development_set : entry.production_set;
                 const pending = draft[environment] ?? "";
                 const working = busy === `${entry.key}:${environment}` || busy === `${entry.key}:${environment}:clear`;
+                const slot = `${entry.key}:${environment}`;
+                const shown = revealed[slot] ?? null;
+                const isRevealing = revealing === slot;
                 return (
-                  <label key={environment} className="block">
+                  <div key={environment} className="block">
                     <span className="mb-1.5 flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-zinc-500">
                       {environment}
                       <span
@@ -207,7 +267,34 @@ export function EnvironmentSection({ onError }: { onError: (message: string | nu
                       >
                         {dbSet ? "db" : entry.shell_set ? "shell" : "unset"}
                       </span>
+                      <button
+                        type="button"
+                        disabled={isRevealing}
+                        onClick={() => (shown ? hide(slot) : reveal(entry.key, environment))}
+                        className="rounded px-1.5 py-0.5 font-mono text-[10px] normal-case text-zinc-500 transition-colors hover:text-zinc-200 disabled:opacity-40"
+                      >
+                        {isRevealing ? "…" : shown ? "hide" : "show"}
+                      </button>
                     </span>
+                    {shown && (
+                      <div className="mb-2 flex items-center gap-2 rounded-lg border border-white/[0.07] bg-black/40 px-3 py-2">
+                        <span className="text-[10px] uppercase tracking-wide text-zinc-600">
+                          {shown.source === "db" ? "from database" : shown.source === "shell" ? "from shell" : "unset"}
+                        </span>
+                        <code className="min-w-0 flex-1 truncate font-mono text-xs text-zinc-200">
+                          {shown.value ?? "—"}
+                        </code>
+                        {shown.value && (
+                          <button
+                            type="button"
+                            onClick={() => copy(slot)}
+                            className="shrink-0 text-[11px] text-zinc-500 transition-colors hover:text-zinc-200"
+                          >
+                            Copy
+                          </button>
+                        )}
+                      </div>
+                    )}
                     <div className="flex gap-2">
                       <input
                         type="password"
@@ -243,7 +330,7 @@ export function EnvironmentSection({ onError }: { onError: (message: string | nu
                         </button>
                       )}
                     </div>
-                  </label>
+                  </div>
                 );
               })}
             </div>
