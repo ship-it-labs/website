@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import crypto from "node:crypto";
-import { planIdFromMembership, isDuplicateKeyError, whopPlanIdOf } from "../src/services/whop-service.js";
+import { planIdFromMembership, isDuplicateKeyError, whopPlanIdOf, classifyWebhookObject } from "../src/services/whop-service.js";
 
 /**
  * Whop uses the Standard Webhooks spec. These tests exercise the real signature
@@ -265,6 +265,24 @@ describe("membership plan resolution", () => {
   it("returns null when the payload names no plan", () => {
     expect(whopPlanIdOf({ ...base })).toBeNull();
     expect(whopPlanIdOf({ ...base, plan_id: null, plan: null })).toBeNull();
+  });
+});
+
+describe("webhook object routing", () => {
+  // Payment and refund objects once flowed down the membership write path and
+  // overwrote subscription identity with pay_/re_ ids. Routing by prefix keeps
+  // every current and future non-membership shape on the status-only path.
+  it("routes memberships to full handling", () => {
+    expect(classifyWebhookObject("mem_abc123")).toBe("membership");
+  });
+
+  it("routes payments, refunds and unknowns to status-only refresh", () => {
+    expect(classifyWebhookObject("pay_abc123")).toBe("reference");
+    expect(classifyWebhookObject("re_abc123")).toBe("reference");
+    expect(classifyWebhookObject("")).toBe("reference");
+    expect(classifyWebhookObject(undefined)).toBe("reference");
+    expect(classifyWebhookObject(null)).toBe("reference");
+    expect(classifyWebhookObject(42)).toBe("reference");
   });
 });
 

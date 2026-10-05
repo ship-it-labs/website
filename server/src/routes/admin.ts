@@ -866,6 +866,19 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    // Only membership objects back a subscription. Payments (pay_…) and
+    // refunds (re_…) resolve in lookup but corrupt the row the same way the
+    // webhook once did, so they are refused with a message that says what to
+    // paste instead.
+    if (!membership.id.startsWith("mem_")) {
+      return reply.status(400).send({
+        error: {
+          code: "NOT_A_MEMBERSHIP",
+          message: "That id is not a membership (memberships start with mem_). Paste the membership id from the Whop dashboard, not the payment id.",
+        },
+      });
+    }
+
     // A membership carrying another account's id refuses to attach: without
     // this, a pasted id could move anyone's payment onto anyone's account.
     // Memberships with no embedded id attach on the admin's explicit say-so.

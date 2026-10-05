@@ -183,6 +183,19 @@ export interface WhopMembership {
 }
 
 /**
+ * Which handling an event's object gets. Memberships carry subscription
+ * identity and take the full write path; everything else (payments, refunds,
+ * future shapes) only refreshes status on the existing row. Routed by id
+ * prefix because event types alone proved unreliable — payment events arrived
+ * shaped like memberships and corrupted the stored identity.
+ */
+export type WebhookObjectKind = "membership" | "reference";
+
+export function classifyWebhookObject(id: unknown): WebhookObjectKind {
+  return typeof id === "string" && id.startsWith("mem_") ? "membership" : "reference";
+}
+
+/**
  * The Whop plan behind a membership, whatever shape carried it. Null when the
  * payload names none — callers store null rather than undefined, which the
  * database drivers accept and undefined crashes.
@@ -213,12 +226,14 @@ export async function listMembershipsForUser(
 
 /**
  * Cancels at period end by default so a customer keeps access until they paid
- * for. Passing cancel_at_period_end false would revoke immediately, which is
- * rarely what a "cancel my subscription" button should do.
+ * for. Implemented as a membership update, not the cancel endpoint: the live
+ * API rejects cancel_at_period_end on cancel with parameter_invalid (the SDK
+ * type still declares it), while PATCH update documents true as "schedule for
+ * period end" and false as "reverse a pending one".
  */
 export async function cancelMembership(membershipId: string): Promise<void> {
   const c = whopClient();
-  await c.memberships.cancel({
+  await c.memberships.update({
     id: membershipId,
     cancel_at_period_end: true,
   });
@@ -403,7 +418,53 @@ export async function handleWebhookEvent(
       .from("webhook_events")
       .update({ processed: true })
       .eq("idempotency_key", event.id);
-    return { handled: false, duplicate: false };
+    // Handled, not failed: no account link exists on the event, so no retry
+    // will ever resolve it. Returning false would 500 and retry forever.
+    return { handled: true, duplicate: false };
+  }
+
+  // Only membership objects carry subscription identity. Payment, refund and
+  // any future shapes reference them (pay_…, re_…) instead — refreshing the
+  // existing row's status, never overwriting its membership ids or plan.
+  // Storing a pay_ id as the membership once corrupted lookups (404 on every
+  // retrieve) and plan mapping, so the shapes are routed by id prefix.
+  const eventObjectId = typeof membership.id === "string" ? membership.id : "";
+  if (classifyWebhookObject(eventObjectId) === "reference") {
+    const refreshStatus =
+      desiredStatus === "active"
+        ? (membership.cancel_at_period_end ? "canceled" : "active")
+        : desiredStatus;
+
+    const { data: existing } = await supabase
+      .from("subscriptions")
+      .select("user_id")
+      .eq("user_id", userId)
+      .single();
+
+    if (existing) {
+      await supabase
+        .from("subscriptions")
+        .update({ status: refreshStatus, updated_at: new Date().toISOString() })
+        .eq("user_id", userId);
+
+      // A refund ends paid access: the money is back, so the tier goes with
+      // it. Anything else leaves the plan exactly as the membership events
+      // set it — a payment confirmation must never re-tier an account.
+      if (desiredStatus === "free") {
+        await supabase.from("users").update({ plan_id: "free" }).eq("id", userId);
+      }
+    } else {
+      logger.info(
+        { eventId: event.id, type: event.type, userId },
+        "Non-membership event for an account with no subscription; nothing to refresh"
+      );
+    }
+
+    await supabase
+      .from("webhook_events")
+      .update({ processed: true })
+      .eq("idempotency_key", event.id);
+    return { handled: true, duplicate: false };
   }
 
   // A deactivation or refund ends paid access, full stop. Stale metadata still
