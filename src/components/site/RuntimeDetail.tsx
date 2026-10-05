@@ -38,6 +38,39 @@ const ACTION_LABEL: Record<Action, string> = {
   stop: "Delete",
 };
 
+/**
+ * Pulls the runtime out of a status response that may wear several shapes.
+ * The endpoint proxies the orchestrator verbatim, and orchestrator versions
+ * have returned both `{ runtime: {...} }` and the flat runtime object — while
+ * error payloads look like `{ error: {...} }`. Guessing wrong used to leave
+ * the modal on "Loading..." forever with no error, which reads exactly like a
+ * row that cannot be clicked.
+ */
+export function normalizeRuntimeDetail(
+  payload: unknown
+): RuntimeDetail | { missing: true } | null {
+  if (!payload || typeof payload !== "object") return null;
+
+  const record = payload as Record<string, unknown>;
+  const candidate =
+    isRuntimeLike(record.runtime) ? record.runtime :
+    isRuntimeLike(record.data) ? record.data :
+    isRuntimeLike(record) ? record :
+    null;
+
+  if (!candidate) return null;
+  if (candidate.status === "not_found") return { missing: true };
+  return candidate as unknown as RuntimeDetail;
+}
+
+function isRuntimeLike(value: unknown): value is Record<string, unknown> {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    typeof (value as Record<string, unknown>).runtime_id === "string"
+  );
+}
+
 export function RuntimeDetail({
   runtimeId,
   now,
@@ -52,6 +85,7 @@ export function RuntimeDetail({
   onChanged: () => void;
 }) {
   const [detail, setDetail] = useState<RuntimeDetail | null>(null);
+  const [gone, setGone] = useState(false);
   const [info, setInfo] = useState<Info | null>(null);
   const [busy, setBusy] = useState<Action | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -62,16 +96,37 @@ export function RuntimeDetail({
       // Both requests matter: status decides which buttons make sense, and info
       // carries the numbers worth showing.
       const [status, details] = await Promise.all([
-        api.get<{ runtime: RuntimeDetail }>(`/api/v1/runtimes/${runtimeId}`),
+        api.get<unknown>(`/api/v1/runtimes/${runtimeId}`),
         api
           .post<Info>(`/api/v1/runtimes/${runtimeId}/info`, {})
           .catch(() => null),
       ]);
 
-      setDetail(status.runtime ?? null);
+      const parsed = normalizeRuntimeDetail(status);
+      if (!parsed) {
+        // A shape nobody recognizes is a failure, not an eternal spinner: say
+        // so, with a retry, instead of showing "Loading..." until heat death.
+        setError("The runtime answered in a format this page does not understand.");
+        return;
+      }
+      if ("missing" in parsed) {
+        setGone(true);
+        setDetail(null);
+        setError(null);
+        return;
+      }
+
+      setDetail(parsed);
+      setGone(false);
       setInfo(details);
       setError(null);
     } catch (err) {
+      if (err instanceof Error && /404|not found/i.test(err.message)) {
+        setGone(true);
+        setDetail(null);
+        setError(null);
+        return;
+      }
       setError(err instanceof Error ? err.message : "Could not load the runtime");
     }
   }, [runtimeId]);
@@ -103,34 +158,100 @@ export function RuntimeDetail({
     }
   };
 
-  const status = detail?.status ?? "unknown";
+  return (
+    <Modal title={runtimeId} description="Runtime details" onClose={onClose}>
+      {gone ? (
+        <div className="py-4 text-center">
+          <p className="text-sm text-zinc-300">
+            This runtime no longer exists. It may have expired, been deleted,
+            or belonged to a restart the platform has since forgotten.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              onChanged();
+              onClose();
+            }}
+            className="mt-5 rounded-xl bg-white px-5 py-2.5 text-sm font-medium text-zinc-950 transition-transform duration-200 hover:scale-[1.02]"
+          >
+            Close and refresh
+          </button>
+        </div>
+      ) : (
+        <>
+          {error && (
+            <div className="mb-4 rounded-xl border border-rose-400/25 bg-rose-500/10 px-4 py-3">
+              <p className="text-sm text-rose-200">{error}</p>
+              <button
+                type="button"
+                onClick={() => {
+                  setError(null);
+                  load();
+                }}
+                className="mt-2 text-xs text-zinc-400 transition-colors hover:text-zinc-200"
+              >
+                Try again
+              </button>
+            </div>
+          )}
+
+          {!detail && !error ? (
+            <p className="text-sm text-zinc-500">Loading...</p>
+          ) : detail ? (
+            <RuntimeBody
+              detail={detail}
+              info={info}
+              now={now}
+              plan={plan}
+              busy={busy}
+              confirmStop={confirmStop}
+              setConfirmStop={setConfirmStop}
+              act={act}
+            />
+          ) : null}
+        </>
+      )}
+    </Modal>
+  );
+}
+
+function RuntimeBody({
+  detail,
+  info,
+  now,
+  plan,
+  busy,
+  confirmStop,
+  setConfirmStop,
+  act,
+}: {
+  detail: RuntimeDetail;
+  info: Info | null;
+  now: number;
+  plan?: { max_ram_mb: number; cpu: number };
+  busy: Action | null;
+  confirmStop: boolean;
+  setConfirmStop: (value: boolean) => void;
+  act: (action: Action) => void;
+}) {
+  const status = detail.status ?? "unknown";
   const alive = status === "running" || status === "starting" || status === "paused";
   const paused = status === "paused";
   const metrics = info?.metrics;
 
   return (
-    <Modal title={runtimeId} description="Runtime details" onClose={onClose}>
-      {error && (
-        <p className="mb-4 rounded-xl border border-rose-400/25 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-          {error}
-        </p>
-      )}
+    <>
+      <div className="mb-6 flex items-center gap-3">
+        <StatusDot status={status} />
+        <span className="text-sm capitalize text-zinc-300">{status}</span>
+        {alive && (
+          <span className="ml-auto">
+            <LeaseCountdown leaseExpiresAt={detail.lease_expires_at} now={now} />
+          </span>
+        )}
+      </div>
 
-      {!detail ? (
-        <p className="text-sm text-zinc-500">Loading...</p>
-      ) : (
-        <>
-          <div className="mb-6 flex items-center gap-3">
-            <StatusDot status={status} />
-            <span className="text-sm capitalize text-zinc-300">{status}</span>
-            {alive && (
-              <span className="ml-auto">
-                <LeaseCountdown leaseExpiresAt={detail.lease_expires_at} now={now} />
-              </span>
-            )}
-          </div>
-
-          <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
+      <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
             <Spec label="Public URL">
               {detail.app_url ? (
                 <a
@@ -234,9 +355,7 @@ export function RuntimeDetail({
               </p>
             )}
           </div>
-        </>
-      )}
-    </Modal>
+    </>
   );
 }
 
