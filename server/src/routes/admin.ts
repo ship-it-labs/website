@@ -1,6 +1,6 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { supabase } from "../db/index.js";
+import { supabase, usingSqlite } from "../db/index.js";
 import { authenticateApiKey } from "../middleware/auth.js";
 import { requireAdmin } from "../middleware/require-admin.js";
 import { callOrchestrator } from "../services/orchestrator-client.js";
@@ -21,11 +21,27 @@ import { isAdminUser } from "../services/admin.js";
 import { logger } from "../utils/logger.js";
 
 /**
- * Platform administration. Every route here answers for all users at once,
- * which is why each one carries requireAdmin on top of authenticateApiKey.
- * A missing guard on any of these is a cross-account data leak, so the pair
- * is registered once for the whole plugin rather than per route.
+ * Tables the database console may browse. Credentials and raw secrets never
+ * appear: auth tables are absent entirely, and hash/value columns are excluded
+ * from the select so a screenshot cannot leak them.
  */
+const DB_TABLES: { name: string; description: string; columns: string }[] = [
+  { name: "users", description: "Accounts and tiers", columns: "id, email, plan_id, is_admin, is_active, created_at" },
+  { name: "plans", description: "Pricing tiers", columns: "id, name, runtime_hours_per_month, max_runtime_hours, max_concurrent_runtimes, price_cents" },
+  { name: "subscriptions", description: "Billing memberships", columns: "user_id, plan_id, status, current_period_end, cancel_at_period_end, updated_at" },
+  { name: "api_keys", description: "API keys (hashes never shown)", columns: "id, user_id, key_prefix, name, is_active, created_at, last_used_at, expires_at" },
+  { name: "projects", description: "Uploaded projects", columns: "id, user_id, name, repo_url, file_count, created_at" },
+  { name: "builds", description: "Build runs", columns: "id, user_id, project_id, status, exit_code, created_at, completed_at" },
+  { name: "build_logs", description: "Build output lines", columns: "build_id, stream, created_at" },
+  { name: "runtimes", description: "Runtime records", columns: "id, user_id, project_id, status, created_at" },
+  { name: "runtime_sessions", description: "Billed sessions", columns: "id, user_id, started_at, stopped_at, duration_seconds" },
+  { name: "usage_months", description: "Monthly usage totals", columns: "user_id, period_start, runtime_used_seconds, build_count" },
+  { name: "webhook_events", description: "Inbound webhook log", columns: "provider, event_type, processed, created_at" },
+  { name: "user_sessions", description: "Remembered logins (token hashes never shown)", columns: "id, user_id, user_agent, ip, created_at, last_seen_at" },
+  { name: "user_preferences", description: "Notification and display prefs", columns: "user_id, email_notifications, theme, updated_at" },
+  { name: "platform_settings", description: "Kill switches and overrides", columns: "key, updated_at" },
+  { name: "env_overrides", description: "DB-managed config (values never shown)", columns: "key, environment, updated_at" },
+];
 
 const managerUrl = () => process.env.SERVER_MANAGER_URL || "http://manager:3001";
 const managerSecret = () => process.env.ORCHESTRATOR_SECRET || "";
@@ -126,6 +142,12 @@ export async function getSetting<T>(key: string, fallback: T): Promise<T> {
   return readSettingValue((data as { value: unknown }).value) as T ?? fallback;
 }
 
+/**
+ * Platform administration. Every route here answers for all users at once,
+ * which is why each one carries requireAdmin on top of authenticateApiKey.
+ * A missing guard on any of these is a cross-account data leak, so the pair
+ * is registered once for the whole plugin rather than per route.
+ */
 export async function adminRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authenticateApiKey);
   app.addHook("preHandler", requireAdmin);
@@ -761,8 +783,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
-  app.post("/admin/subscriptions/attach", async (req, reply) => {
-    const parsed = z
+  app.post("/admin/subscriptions/attach", async (req, reply) => {    const parsed = z
       .object({
         user_email: z.string().trim().email().max(254).optional(),
         user_id: z.string().min(1).max(64).optional(),
@@ -860,5 +881,107 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       "Admin attached Whop membership"
     );
     return reply.send({ success: true, plan_id: planId, status });
+  });
+
+  app.get("/admin/db", async (_req, reply) => {
+    return reply.send({
+      driver: usingSqlite ? "sqlite" : "supabase",
+      raw_sql: usingSqlite,
+      tables: DB_TABLES.map((table) => ({ name: table.name, description: table.description })),
+    });
+  });
+
+  app.get("/admin/db/rows", async (req, reply) => {
+    const { table, limit } = req.query as { table?: string; limit?: string };
+    const entry = DB_TABLES.find((candidate) => candidate.name === table);
+    if (!entry) {
+      return reply.status(400).send({
+        error: { code: "UNKNOWN_TABLE", message: "That table is not browsable" },
+      });
+    }
+
+    const count = Math.min(200, Math.max(1, Number(limit) || 50));
+    const { data, error } = await supabase.from(entry.name).select(entry.columns).limit(count);
+    if (error) {
+      return reply.status(500).send({
+        error: { code: "INTERNAL_ERROR", message: "Could not read the table" },
+      });
+    }
+
+    // Long cells (build logs, payloads) would drown the response and the UI,
+    // so values arrive truncated with their full length noted.
+    return reply.send({
+      table: entry.name,
+      rows: ((data ?? []) as Record<string, unknown>[]).map((row) => {
+        const clipped: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(row)) {
+          clipped[key] =
+            typeof value === "string" && value.length > 500
+              ? `${value.slice(0, 500)}… (${value.length} chars)`
+              : value;
+        }
+        return clipped;
+      }),
+    });
+  });
+
+  app.post("/admin/db/query", async (req, reply) => {
+    // Raw execution exists only where the driver allows it: node:sqlite runs
+    // anything, PostgREST runs table queries. Offering a fake textarea on
+    // Supabase that secretly whitelists statements would be dishonest, so
+    // production gets a clear refusal pointing at the dashboard SQL editor.
+    if (!usingSqlite) {
+      return reply.status(400).send({
+        error: {
+          code: "SQL_NOT_SUPPORTED",
+          message: "Raw SQL runs on development SQLite only. Use the Supabase dashboard SQL editor for production.",
+        },
+      });
+    }
+
+    const parsed = z
+      .object({ sql: z.string().trim().min(1).max(20000) })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: { code: "VALIDATION_ERROR", message: "Provide a SQL statement" },
+      });
+    }
+
+    const client = supabase as unknown as {
+      execRaw?: (sql: string) => { columns: string[]; rows: Record<string, unknown>[] };
+    };
+    if (typeof client.execRaw !== "function") {
+      return reply.status(500).send({
+        error: { code: "INTERNAL_ERROR", message: "Raw execution is unavailable" },
+      });
+    }
+
+    let result;
+    try {
+      result = client.execRaw(parsed.data.sql);
+    } catch (err) {
+      return reply.status(400).send({
+        error: { code: "SQL_ERROR", message: err instanceof Error ? err.message : "Query failed" },
+      });
+    }
+
+    logger.info(
+      { admin: req.auth!.userId, sql: parsed.data.sql.slice(0, 200), rows: result.rows.length },
+      "Admin ran raw SQL"
+    );
+
+    const clipped = result.rows.map((row) => {
+      const out: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(row)) {
+        out[key] =
+          typeof value === "string" && value.length > 500
+            ? `${value.slice(0, 500)}… (${value.length} chars)`
+            : value;
+      }
+      return out;
+    });
+
+    return reply.send({ columns: result.columns, rows: clipped });
   });
 }

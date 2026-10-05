@@ -269,6 +269,29 @@ export class SqliteClient {
       .run(userId, exceptToken);
   }
 
+  /**
+   * Runs raw SQL for the admin database console. Development only: there is
+   * no equivalent on Supabase, where PostgREST cannot execute arbitrary
+   * statements. SELECT-like input returns capped rows; anything else executes
+   * and reports back without a result set.
+   */
+  execRaw(sql: string): { columns: string[]; rows: Record<string, unknown>[] } {
+    const head = sql.trim().toLowerCase();
+    if (
+      head.startsWith("select") ||
+      head.startsWith("with") ||
+      head.startsWith("explain") ||
+      head.startsWith("pragma")
+    ) {
+      const rows = this.db.prepare(sql).all() as Record<string, unknown>[];
+      const capped = rows.slice(0, 200);
+      return { columns: capped.length > 0 ? Object.keys(capped[0]) : [], rows: capped };
+    }
+
+    this.db.exec(sql);
+    return { columns: [], rows: [] };
+  }
+
   private sessionUserId: string | null = null;
 
   private createSession(userId: string) {
