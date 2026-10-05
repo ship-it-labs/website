@@ -7,6 +7,7 @@ import { SignupPage } from "@/pages/signup";
 import { DashboardPage } from "@/pages/dashboard";
 import { ApiKeysPage } from "@/pages/api-keys";
 import { BillingPage } from "@/pages/billing";
+import { SettingsPage } from "@/pages/settings";
 import { AdminPage } from "@/pages/admin";
 import { HomePage } from "@/pages/home";
 import { PricingPage } from "@/pages/pricing";
@@ -59,6 +60,14 @@ export function App() {
         element={
           <Protected>
             <BillingPage />
+          </Protected>
+        }
+      />
+      <Route
+        path="/dashboard/settings"
+        element={
+          <Protected>
+            <SettingsPage />
           </Protected>
         }
       />

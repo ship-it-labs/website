@@ -8,6 +8,7 @@ const TABS = [
   { to: "/dashboard", label: "Overview" },
   { to: "/dashboard/keys", label: "API keys" },
   { to: "/dashboard/billing", label: "Billing" },
+  { to: "/dashboard/settings", label: "Settings" },
 ];
 
 // Visible to admins only. The server enforces the same rule on every /admin/*

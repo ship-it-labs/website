@@ -3,6 +3,7 @@ import { supabase, usingSqlite } from "../db/index.js";
 import { generateApiKey } from "../utils/api-key.js";
 import { seedPlans } from "../services/plan-service.js";
 import { BOOTSTRAP_ADMIN_EMAIL } from "../services/admin.js";
+import { recordSession, hashSessionToken } from "../services/sessions.js";
 import { getSetting } from "./admin.js";
 import { logger } from "../utils/logger.js";
 
@@ -134,6 +135,18 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       is_active: true,
     });
 
+    // Remembered for the settings device list and revocation. Best-effort:
+    // a recording failure must never fail the signup it belongs to.
+    if (session?.access_token) {
+      const agent = req.headers["user-agent"];
+      await recordSession({
+        userId,
+        token: session.access_token,
+        userAgent: Array.isArray(agent) ? (agent[0] ?? "") : (agent ?? ""),
+        ip: req.ip ?? "",
+      });
+    }
+
     return reply.status(201).send({
       user: { id: userId, email },
       api_key: key,
@@ -166,13 +179,44 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       .eq("id", credentials.data.user.id)
       .single();
 
+    if (session?.access_token) {
+      const agent = req.headers["user-agent"];
+      await recordSession({
+        userId: credentials.data.user.id,
+        token: session.access_token,
+        userAgent: Array.isArray(agent) ? (agent[0] ?? "") : (agent ?? ""),
+        ip: req.ip ?? "",
+      });
+    }
+
     return reply.send({
       user: user ?? { id: credentials.data.user.id, email },
       session: session?.access_token ? { access_token: session.access_token } : null,
     });
   });
 
-  app.post("/auth/logout", async (_req, reply) => {
+  app.post("/auth/logout", async (req, reply) => {
+    // Forget the remembered row for this token, if one was presented. The
+    // driver sign-out below is best-effort as before; clearing the local
+    // session is what actually ends the browser's access.
+    const header = req.headers.authorization;
+    if (header?.startsWith("Bearer ")) {
+      const token = header.slice(7);
+      try {
+        const { data } = await supabase
+          .from("user_sessions")
+          .select("id, user_id")
+          .eq("token_hash", hashSessionToken(token))
+          .single();
+        const row = (data ?? null) as { id: string } | null;
+        if (row) {
+          await supabase.from("user_sessions").delete().eq("id", row.id);
+        }
+      } catch {
+        // Listing hygiene only; the sign-out below is what matters.
+      }
+    }
+
     await supabase.auth.signOut();
     return reply.send({ success: true });
   });

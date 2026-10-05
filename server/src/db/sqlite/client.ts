@@ -193,6 +193,44 @@ export class SqliteClient {
 
       resetPasswordForEmail: async () => ({ data: {}, error: null }),
 
+      // Sets a new password without knowing the old one: the route verifies
+      // the current password first by signing in, so by the time this runs the
+      // caller is proven to be the account holder.
+      updatePassword: async (params: { id: string; password: string }) => {
+        const row = db.prepare("select id from auth_users where id = ?").get(params.id) as
+          | { id: string }
+          | undefined;
+        if (!row) return { data: null, error: { message: "User not found" } };
+
+        const salt = crypto.randomBytes(16).toString("hex");
+        db.prepare("update auth_users set password_hash = ? where id = ?").run(
+          `${salt}:${hashPassword(params.password, salt)}`,
+          params.id
+        );
+        return { data: { user: { id: params.id } }, error: null };
+      },
+
+      // Changes the login email. The public users row is synced by the route,
+      // which owns the cross-table invariant in both drivers.
+      updateEmail: async (params: { id: string; email: string }) => {
+        const email = params.email.toLowerCase();
+        const clash = db.prepare("select id from auth_users where email = ?").get(email) as
+          | { id: string }
+          | undefined;
+        if (clash && clash.id !== params.id) {
+          return { data: null, error: { message: "That email is already registered" } };
+        }
+        db.prepare("update auth_users set email = ? where id = ?").run(email, params.id);
+        return { data: { user: { id: params.id, email } }, error: null };
+      },
+
+      // Deletes the credential row; auth_sessions cascade. The route deletes
+      // the public users row separately, which cascades the application data.
+      deleteUser: async (params: { id: string }) => {
+        db.prepare("delete from auth_users where id = ?").run(params.id);
+        return { data: null, error: null };
+      },
+
       getSession: async () => ({ data: { session: null }, error: null }),
 
       getUser: async (params: { id?: string }) => {
@@ -207,14 +245,28 @@ export class SqliteClient {
   }
 
   /** Resolves a bearer token to the user id it was issued for. */
-  getUserIdForToken(token: string): string | null {
-    const row = this.db
+  getUserIdForToken(token: string): string | null {    const row = this.db
       .prepare("select user_id, expires_at from auth_sessions where token = ?")
       .get(token) as { user_id: string; expires_at: string } | undefined;
 
     if (!row) return null;
     if (new Date(row.expires_at).getTime() < Date.now()) return null;
     return row.user_id;
+  }
+
+  /** Drops one local session token. Unknown tokens are a no-op, so revoking
+   * twice or revoking after expiry stays quiet instead of erroring. */
+  revokeLocalSession(token: string): void {
+    this.db.prepare("delete from auth_sessions where token = ?").run(token);
+  }
+
+  /** Drops every local session for a user except the one still in use, so
+   * "sign out everywhere" ends other devices immediately rather than at the
+   * seven-day expiry. */
+  revokeOtherLocalSessions(userId: string, exceptToken: string): void {
+    this.db
+      .prepare("delete from auth_sessions where user_id = ? and token != ?")
+      .run(userId, exceptToken);
   }
 
   private sessionUserId: string | null = null;

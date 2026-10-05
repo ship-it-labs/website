@@ -1,6 +1,7 @@
 import { FastifyRequest, FastifyReply } from "fastify";
 import { supabase } from "../db/index.js";
 import { hashApiKey } from "../utils/api-key.js";
+import { hasSessionRow } from "../services/sessions.js";
 import type { Plan, AuthenticatedRequest } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 
@@ -95,6 +96,23 @@ export async function authenticateApiKey(
   }
 
   const userId = resolved.userId;
+
+  // Session tokens must be on record. API keys skip this: the plugin holds no
+  // session, so requiring one would sign out every integration. A token whose
+  // row was revoked — or minted before session tracking shipped, in which case
+  // the owner simply signs in again — reads as expired rather than invalid.
+  if (!isApiKey(token)) {
+    const known = await hasSessionRow(userId, token);
+    if (!known) {
+      reply.status(401).send({
+        error: {
+          code: "SESSION_REVOKED",
+          message: "This session is no longer valid. Sign in again.",
+        },
+      });
+      return;
+    }
+  }
 
   const { data: user, error: userError } = await supabase
     .from("users")

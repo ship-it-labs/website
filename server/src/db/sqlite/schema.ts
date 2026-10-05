@@ -253,6 +253,30 @@ create table if not exists platform_settings (
   updated_at text not null default (datetime('now'))
 );
 
+-- Remembered login sessions, one row per sign-in. Powers the settings page's
+-- device list and "sign out everywhere": revoking deletes the row, and the
+-- driver-level session is killed alongside it, so a forgotten laptop stops
+-- working rather than lingering until token expiry.
+create table if not exists user_sessions (
+  id text primary key,
+  user_id text not null references users(id) on delete cascade,
+  token_hash text not null,
+  user_agent text,
+  ip text,
+  created_at text not null default (datetime('now')),
+  last_seen_at text not null default (datetime('now'))
+);
+create index if not exists idx_user_sessions_user on user_sessions(user_id);
+
+-- Notification and display preferences. Stored before anything consumes them
+-- so the settings page writes somewhere real from day one.
+create table if not exists user_preferences (
+  user_id text primary key references users(id) on delete cascade,
+  email_notifications integer not null default 1,
+  theme text not null default 'dark',
+  updated_at text not null default (datetime('now'))
+);
+
 create table if not exists server_agents (
   id text primary key,
   manager_id text,
