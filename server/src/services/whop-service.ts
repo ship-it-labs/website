@@ -164,15 +164,31 @@ export async function createCheckout(options: {
 
 export interface WhopMembership {
   id: string;
-  plan_id: string;
+  // The plan arrives in different shapes depending on the event: a top-level
+  // plan_id on some payloads, a nested plan object on others, absent entirely
+  // on the rest. Every reader must go through whopPlanIdOf below, because
+  // passing any of these through as undefined crashes the subscription write
+  // on SQLite (which cannot bind undefined) and silently skipped it before
+  // the atomicity guard made the failure loud.
+  plan_id?: string | null;
+  plan?: { id?: string | null } | null;
   status: string;
   user_id: string | null;
   metadata: Record<string, unknown>;
   cancel_at_period_end: boolean;
-  current_period_end: string | null;
+  current_period_end?: string | null;
   // Whop-hosted page where the customer manages the membership themselves,
   // including cancellation and plan changes. Null when no member record exists.
   manage_url?: string | null;
+}
+
+/**
+ * The Whop plan behind a membership, whatever shape carried it. Null when the
+ * payload names none — callers store null rather than undefined, which the
+ * database drivers accept and undefined crashes.
+ */
+export function whopPlanIdOf(membership: WhopMembership): string | null {
+  return membership.plan_id ?? membership.plan?.id ?? null;
 }
 
 export async function retrieveMembership(membershipId: string): Promise<WhopMembership> {
@@ -443,9 +459,9 @@ export async function handleWebhookEvent(
       user_id: userId,
       plan_id: planId ?? "free",
       whop_membership_id: membership.id,
-      whop_plan_id: membership.plan_id,
+      whop_plan_id: whopPlanIdOf(membership),
       status,
-      current_period_end: membership.current_period_end,
+      current_period_end: membership.current_period_end ?? null,
       cancel_at_period_end: membership.cancel_at_period_end ?? false,
       updated_at: now,
     },

@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import crypto from "node:crypto";
-import { planIdFromMembership, isDuplicateKeyError } from "../src/services/whop-service.js";
+import { planIdFromMembership, isDuplicateKeyError, whopPlanIdOf } from "../src/services/whop-service.js";
 
 /**
  * Whop uses the Standard Webhooks spec. These tests exercise the real signature
@@ -238,6 +238,33 @@ describe("membership plan mapping", () => {
     expect(planIdFromMembership({}, "free")).toBe("free");
     expect(planIdFromMembership({}, null)).toBeNull();
     expect(planIdFromMembership({ plan_id: 42 }, "free")).toBe("free");
+  });
+});
+
+describe("membership plan resolution", () => {
+  // Webhook payloads disagree about where the plan lives, and passing
+  // undefined through crashed the subscription write on SQLite while silently
+  // skipping it before the atomicity guard. Null everywhere instead.
+  const base = {
+    id: "mem_1",
+    status: "active",
+    user_id: "u1",
+    metadata: {},
+    cancel_at_period_end: false,
+    current_period_end: null,
+  };
+
+  it("reads the top-level plan id", () => {
+    expect(whopPlanIdOf({ ...base, plan_id: "plan_abc" })).toBe("plan_abc");
+  });
+
+  it("reads the nested plan object", () => {
+    expect(whopPlanIdOf({ ...base, plan: { id: "plan_xyz" } })).toBe("plan_xyz");
+  });
+
+  it("returns null when the payload names no plan", () => {
+    expect(whopPlanIdOf({ ...base })).toBeNull();
+    expect(whopPlanIdOf({ ...base, plan_id: null, plan: null })).toBeNull();
   });
 });
 

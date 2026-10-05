@@ -9,6 +9,7 @@ import { getPlan, getAllPlans } from "../services/plan-service.js";
 import {
   retrieveMembership,
   planIdFromMembership,
+  whopPlanIdOf,
 } from "../services/whop-service.js";
 import {
   MANAGED_ENV_KEYS,
@@ -896,7 +897,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
         user_id: account.id,
         plan_id: planId,
         whop_membership_id: membership.id,
-        whop_plan_id: membership.plan_id,
+        whop_plan_id: whopPlanIdOf(membership),
         status,
         current_period_end: membership.current_period_end ?? null,
         cancel_at_period_end: membership.cancel_at_period_end ?? false,

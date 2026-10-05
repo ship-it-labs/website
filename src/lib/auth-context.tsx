@@ -7,7 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { api, setAccessToken, getAccessToken } from "@/lib/api";
+import { api, setAccessToken, getAccessToken, ApiError } from "@/lib/api";
 
 interface AccountUser {
   id: string;
@@ -48,19 +48,49 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   // Restore the session on load by asking the server who the token belongs to.
+  // Only a definitive rejection clears the token: expired, revoked, disabled
+  // or unknown. Anything else (cold start, 502, offline) keeps it, because
+  // wiping credentials over a transient failure is exactly how opening the
+  // homepage "logged out" a signed-in user. One retry covers slow wakes.
   useEffect(() => {
     if (!getAccessToken()) {
       setLoading(false);
       return;
     }
 
-    api
-      .get<AccountResponse>("/api/v1/account")
-      .then((result) =>
-        setUser({ ...result.user, is_admin: result.is_admin ?? result.user.is_admin ?? false })
-      )
-      .catch(() => setAccessToken(null))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    (async () => {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const result = await api.get<AccountResponse>("/api/v1/account");
+          if (!cancelled) {
+            setUser({ ...result.user, is_admin: result.is_admin ?? result.user.is_admin ?? false });
+          }
+          return;
+        } catch (err) {
+          const dead =
+            err instanceof ApiError && (err.status === 401 || err.status === 403);
+          if (dead) {
+            if (!cancelled) setAccessToken(null);
+            return;
+          }
+          if (attempt === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+          }
+        }
+      }
+    })()
+      .catch(() => {
+        // Unreachable in practice (every failure path above is handled), but an
+        // unhandled rejection here would surface as a console error on load.
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const signUp = useCallback(async (email: string, password: string) => {
