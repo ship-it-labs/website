@@ -97,20 +97,26 @@ export interface CheckoutResult {
  * Resolves a platform tier to the Whop plan that sells it.
  *
  * Pricing is owned by Whop, so the platform stores no amounts for paid tiers and
- * keeps only the mapping. The ids come from the environment rather than the
- * database so that rotating a plan id is a configuration change, not a data
- * migration.
+ * keeps only the mapping. Each tier has an environment-specific variable
+ * (SANDBOX_* in development, PROD_* in production) so test and live plans never
+ * cross: a sandbox checkout must not sell the live plan and vice versa. The
+ * older shared WHOP_*_PLAN_ID variables still work as a fallback, so existing
+ * deployments keep selling while they migrate — but a set environment-specific
+ * value always wins.
  */
-const PLAN_ID_ENV: Record<string, string> = {
+const PLAN_ENV_NAME: Record<string, string> = {
+  pro: "PRO",
+  plus: "PLUS",
+  ultra: "ULTRA",
+};
+
+const LEGACY_PLAN_ID_ENV: Record<string, string> = {
   pro: "WHOP_PRO_PLAN_ID",
   plus: "WHOP_PLUS_PLAN_ID",
   ultra: "WHOP_ULTRA_PLAN_ID",
 };
 
-export function whopPlanIdFor(planId: string): string | null {
-  const envName = PLAN_ID_ENV[planId];
-  if (!envName) return null;
-
+function checkPlanId(planId: string, envName: string): string | null {
   const value = process.env[envName]?.trim();
   if (!value) return null;
 
@@ -126,9 +132,21 @@ export function whopPlanIdFor(planId: string): string | null {
   return value;
 }
 
+export function whopPlanIdFor(planId: string): string | null {
+  const name = PLAN_ENV_NAME[planId];
+  if (!name) return null;
+
+  const production = process.env.NODE_ENV === "production";
+  const specific = checkPlanId(planId, `${production ? "PROD" : "SANDBOX"}_${name}_PLAN_ID`);
+  if (specific) return specific;
+
+  const legacyName = LEGACY_PLAN_ID_ENV[planId];
+  return legacyName ? checkPlanId(planId, legacyName) : null;
+}
+
 /** Reports which tiers are missing a Whop plan, so misconfiguration is visible. */
 export function unconfiguredPlans(): string[] {
-  return Object.keys(PLAN_ID_ENV).filter((planId) => !whopPlanIdFor(planId));
+  return Object.keys(PLAN_ENV_NAME).filter((planId) => !whopPlanIdFor(planId));
 }
 
 /**

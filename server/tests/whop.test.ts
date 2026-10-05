@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import crypto from "node:crypto";
-import { planIdFromMembership, isDuplicateKeyError, whopPlanIdOf, classifyWebhookObject } from "../src/services/whop-service.js";
+import { planIdFromMembership, isDuplicateKeyError, whopPlanIdOf, classifyWebhookObject, whopPlanIdFor } from "../src/services/whop-service.js";
 
 /**
  * Whop uses the Standard Webhooks spec. These tests exercise the real signature
@@ -283,6 +283,58 @@ describe("webhook object routing", () => {
     expect(classifyWebhookObject(undefined)).toBe("reference");
     expect(classifyWebhookObject(null)).toBe("reference");
     expect(classifyWebhookObject(42)).toBe("reference");
+  });
+});
+
+describe("environment-specific plan ids", () => {
+  const keys = [
+    "SANDBOX_PRO_PLAN_ID",
+    "SANDBOX_ULTRA_PLAN_ID",
+    "PROD_PRO_PLAN_ID",
+    "PROD_ULTRA_PLAN_ID",
+    "WHOP_PRO_PLAN_ID",
+    "WHOP_ULTRA_PLAN_ID",
+  ];
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of keys) {
+      saved[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of keys) {
+      if (saved[key] === undefined) delete process.env[key];
+      else process.env[key] = saved[key];
+    }
+  });
+
+  it("prefers the environment-specific variable", () => {
+    process.env.NODE_ENV = "development";
+    process.env.SANDBOX_PRO_PLAN_ID = "plan_sandbox";
+    process.env.WHOP_PRO_PLAN_ID = "plan_legacy";
+    expect(whopPlanIdFor("pro")).toBe("plan_sandbox");
+  });
+
+  it("reads the production column in production", () => {
+    process.env.NODE_ENV = "production";
+    process.env.PROD_ULTRA_PLAN_ID = "plan_live";
+    process.env.WHOP_ULTRA_PLAN_ID = "plan_legacy";
+    expect(whopPlanIdFor("ultra")).toBe("plan_live");
+  });
+
+  it("falls back to the legacy shared variable", () => {
+    process.env.NODE_ENV = "development";
+    process.env.WHOP_PRO_PLAN_ID = "plan_legacy";
+    expect(whopPlanIdFor("pro")).toBe("plan_legacy");
+  });
+
+  it("returns null for unknown tiers and bad values", () => {
+    expect(whopPlanIdFor("enterprise")).toBeNull();
+    process.env.SANDBOX_PRO_PLAN_ID = "https://whop.com/not-an-id";
+    expect(whopPlanIdFor("pro")).toBeNull();
   });
 });
 
