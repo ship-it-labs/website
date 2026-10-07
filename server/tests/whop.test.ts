@@ -1,18 +1,20 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import crypto from "node:crypto";
-import { planIdFromMembership, isDuplicateKeyError, whopPlanIdOf, classifyWebhookObject, whopPlanIdFor } from "../src/services/whop-service.js";
+import { planIdFromMembership, isDuplicateKeyError, whopPlanIdOf, classifyWebhookObject, whopPlanIdFor, expectedWhopPlanEnvName, isSameTierActiveSubscription, promoCodeOf, verifyWebhookSignature } from "../src/services/whop-service.js";
 
 /**
  * Whop uses the Standard Webhooks spec. These tests exercise the real signature
  * scheme, plus the replay window and the sandbox/live split, without needing
  * Whop credentials.
+ *
+ * Standard Webhooks signs with base64-decoded secrets. The test secret is
+ * stored as a base64 string in env; signing uses the decoded key.
  */
+const SECRET_B64 = Buffer.from("whop-sandbox-test-secret", "utf8").toString("base64");
 
-const SECRET = "whop-sandbox-test-secret";
-
-function sign(body: string, id: string, timestamp: string): string {
+function sign(body: string, id: string, timestamp: string, secretB64 = SECRET_B64): string {
   const digest = crypto
-    .createHmac("sha256", Buffer.from(SECRET, "utf8"))
+    .createHmac("sha256", Buffer.from(secretB64, "base64"))
     .update(`${id}.${timestamp}.${body}`)
     .digest("base64");
   return `v1,${digest}`;
@@ -33,7 +35,7 @@ afterEach(() => {
 
 describe("standard webhooks signature", () => {
   beforeEach(() => {
-    process.env.WHOP_WEBHOOK_SECRET = SECRET;
+    process.env.WHOP_WEBHOOK_SECRET = SECRET_B64;
     process.env.NODE_ENV = "development";
   });
 
@@ -266,6 +268,42 @@ describe("membership plan resolution", () => {
     expect(whopPlanIdOf({ ...base })).toBeNull();
     expect(whopPlanIdOf({ ...base, plan_id: null, plan: null })).toBeNull();
   });
+
+  it("returns the promo code when present", () => {
+    expect(promoCodeOf({ ...base, promo_code: "FREE50" })).toBe("FREE50");
+  });
+
+  it("returns null for missing or misshapen promo codes", () => {
+    expect(promoCodeOf({ ...base })).toBeNull();
+    expect(promoCodeOf({ ...base, promo_code: null })).toBeNull();
+    expect(promoCodeOf({ ...base, promo_code: "" })).toBeNull();
+    expect(promoCodeOf({ ...base, promo_code: 42 as unknown as string })).toBeNull();
+  });
+});
+
+describe("duplicate checkout guard", () => {
+  // Buying the tier you already hold opens a second paid membership. The
+  // checkout route refuses those; anything else (different tier, dead status,
+  // scheduled cancellation) proceeds.
+  it("blocks re-buying the active tier", () => {
+    expect(isSameTierActiveSubscription({ plan_id: "pro", status: "active" }, "pro")).toBe(true);
+    expect(isSameTierActiveSubscription({ plan_id: "pro", status: "past_due" }, "pro")).toBe(true);
+    expect(isSameTierActiveSubscription({ plan_id: "pro", status: "trialing" }, "pro")).toBe(true);
+  });
+
+  it("allows a different tier", () => {
+    expect(isSameTierActiveSubscription({ plan_id: "pro", status: "active" }, "ultra")).toBe(false);
+  });
+
+  it("allows dead or departing states", () => {
+    expect(isSameTierActiveSubscription({ plan_id: "pro", status: "canceled" }, "pro")).toBe(false);
+    expect(isSameTierActiveSubscription({ plan_id: "pro", status: "free" }, "pro")).toBe(false);
+    expect(isSameTierActiveSubscription({ plan_id: "free", status: "active" }, "pro")).toBe(false);
+    expect(
+      isSameTierActiveSubscription({ plan_id: "pro", status: "active", cancel_at_period_end: true }, "pro")
+    ).toBe(false);
+    expect(isSameTierActiveSubscription(null, "pro")).toBe(false);
+  });
 });
 
 describe("webhook object routing", () => {  // Payment and refund objects once flowed down the membership write path and
@@ -335,6 +373,20 @@ describe("environment-specific plan ids", () => {
     process.env.SANDBOX_PRO_PLAN_ID = "https://whop.com/not-an-id";
     expect(whopPlanIdFor("pro")).toBeNull();
   });
+
+  it("names the environment-specific variable for error messages", async () => {
+    process.env.NODE_ENV = "development";
+    const { expectedWhopPlanEnvName } = await freshService();
+    expect(expectedWhopPlanEnvName("pro")).toBe("SANDBOX_PRO_PLAN_ID");
+    expect(expectedWhopPlanEnvName("ultra")).toBe("SANDBOX_ULTRA_PLAN_ID");
+    expect(expectedWhopPlanEnvName("enterprise")).toBeNull();
+  });
+
+  it("names the production variable in production", async () => {
+    process.env.NODE_ENV = "production";
+    const { expectedWhopPlanEnvName } = await freshService();
+    expect(expectedWhopPlanEnvName("pro")).toBe("PROD_PRO_PLAN_ID");
+  });
 });
 
 describe("duplicate delivery detection", () => {
@@ -360,9 +412,9 @@ describe("duplicate delivery detection", () => {
 describe("environment-specific webhook secrets", () => {
   const secretKeys = ["SANDBOX_WEBHOOK_SECRET", "PROD_WEBHOOK_SECRET", "WHOP_WEBHOOK_SECRET"];
 
-  function signWith(secret: string, body: string, id: string, timestamp: string): string {
+  function signWith(secretB64: string, body: string, id: string, timestamp: string): string {
     const digest = crypto
-      .createHmac("sha256", Buffer.from(secret, "utf8"))
+      .createHmac("sha256", Buffer.from(secretB64, "base64"))
       .update(`${id}.${timestamp}.${body}`)
       .digest("base64");
     return `v1,${digest}`;
@@ -382,54 +434,60 @@ describe("environment-specific webhook secrets", () => {
   }
 
   it("verifies with the sandbox secret in development", async () => {
+    const sandboxSecretB64 = Buffer.from("sandbox-only-secret", "utf8").toString("base64");
     process.env.NODE_ENV = "development";
-    process.env.SANDBOX_WEBHOOK_SECRET = "sandbox-only-secret";
+    process.env.SANDBOX_WEBHOOK_SECRET = sandboxSecretB64;
     const { verifyWebhookSignature } = await freshService();
     const { body, id, timestamp } = payload();
 
     expect(
-      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith("sandbox-only-secret", body, id, timestamp) })
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(sandboxSecretB64, body, id, timestamp) })
     ).toBe(true);
   });
 
   it("prefers the specific secret over the legacy one", async () => {
+    const sandboxSecretB64 = Buffer.from("sandbox-only-secret", "utf8").toString("base64");
+    const legacySecretB64 = Buffer.from("legacy-secret", "utf8").toString("base64");
     process.env.NODE_ENV = "development";
-    process.env.SANDBOX_WEBHOOK_SECRET = "sandbox-only-secret";
-    process.env.WHOP_WEBHOOK_SECRET = "legacy-secret";
+    process.env.SANDBOX_WEBHOOK_SECRET = sandboxSecretB64;
+    process.env.WHOP_WEBHOOK_SECRET = legacySecretB64;
     const { verifyWebhookSignature } = await freshService();
     const { body, id, timestamp } = payload();
 
     expect(
-      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith("sandbox-only-secret", body, id, timestamp) })
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(sandboxSecretB64, body, id, timestamp) })
     ).toBe(true);
     expect(
-      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith("legacy-secret", body, id, timestamp) })
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(legacySecretB64, body, id, timestamp) })
     ).toBe(false);
   });
 
   it("falls back to the legacy secret when nothing specific is set", async () => {
+    const legacySecretB64 = Buffer.from("legacy-secret", "utf8").toString("base64");
     process.env.NODE_ENV = "development";
-    process.env.WHOP_WEBHOOK_SECRET = "legacy-secret";
+    process.env.WHOP_WEBHOOK_SECRET = legacySecretB64;
     const { verifyWebhookSignature } = await freshService();
     const { body, id, timestamp } = payload();
 
     expect(
-      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith("legacy-secret", body, id, timestamp) })
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(legacySecretB64, body, id, timestamp) })
     ).toBe(true);
   });
 
   it("verifies with the production secret in production", async () => {
+    const prodSecretB64 = Buffer.from("prod-only-secret", "utf8").toString("base64");
+    const sandboxSecretB64 = Buffer.from("sandbox-only-secret", "utf8").toString("base64");
     process.env.NODE_ENV = "production";
-    process.env.PROD_WEBHOOK_SECRET = "prod-only-secret";
-    process.env.SANDBOX_WEBHOOK_SECRET = "sandbox-only-secret";
+    process.env.PROD_WEBHOOK_SECRET = prodSecretB64;
+    process.env.SANDBOX_WEBHOOK_SECRET = sandboxSecretB64;
     const { verifyWebhookSignature } = await freshService();
     const { body, id, timestamp } = payload();
 
     expect(
-      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith("prod-only-secret", body, id, timestamp) })
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(prodSecretB64, body, id, timestamp) })
     ).toBe(true);
     expect(
-      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith("sandbox-only-secret", body, id, timestamp) })
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(sandboxSecretB64, body, id, timestamp) })
     ).toBe(false);
   });
 });

@@ -1,4 +1,6 @@
 import { ProsePage } from "@/components/site/ProsePage";
+import { ShowMoreButton, useShowMore } from "@/components/site/ShowMore";
+import { usePageTitle } from "@/lib/page-title";
 
 interface Entry {
   date: string;
@@ -43,13 +45,17 @@ const ENTRIES: Entry[] = [
 ];
 
 export function ChangelogPage() {
+  usePageTitle("Changelog");
+  // Hook form here, not <ShowMore>: the toggle button is not an <li>, so it
+  // must render after the </ol>, not inside it.
+  const { visible, expanded, hidden, toggle } = useShowMore(ENTRIES, 3);
   return (
     <ProsePage
       title="Changelog"
       subtitle="What shipped, newest first. No marketing — just the changes."
     >
       <ol className="relative space-y-10 border-l border-white/[0.08] pl-8">
-        {ENTRIES.map((entry) => (
+        {visible.map((entry) => (
           <li key={`${entry.date}-${entry.title}`} className="relative">
             <span
               aria-hidden="true"
@@ -70,6 +76,12 @@ export function ChangelogPage() {
           </li>
         ))}
       </ol>
+      <ShowMoreButton
+        expanded={expanded}
+        hidden={hidden}
+        onToggle={toggle}
+        expandLabel={(n) => `Show all changes (${n} more)`}
+      />
     </ProsePage>
   );
 }

@@ -1,6 +1,8 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { AuroraBackground } from "@/components/site/AuroraBackground";
+import { OfflineBanner } from "@/components/site/OfflineBanner";
+import { Skeleton } from "@/components/site/Skeleton";
 import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/utils";
 
@@ -49,13 +51,16 @@ export function DashboardLayout({
             />
           </Link>
 
-          <nav className="hidden items-center gap-1 md:flex">
+          {/* Scrolls horizontally on narrow screens instead of wrapping or
+              clipping: shrink-0 keeps every tab tappable, the scroll region
+              absorbs the overflow. The hamburger menu below covers xs. */}
+          <nav className="mx-2 hidden min-w-0 flex-1 items-center gap-1 overflow-x-auto sm:flex">
             {(user?.is_admin ? [...TABS, ADMIN_TAB] : TABS).map((tab) => (
               <Link
                 key={tab.to}
                 to={tab.to}
                 className={cn(
-                  "rounded-lg px-3.5 py-2 text-sm transition-colors duration-200",
+                  "shrink-0 whitespace-nowrap rounded-lg px-3.5 py-2 text-sm transition-colors duration-200",
                   location.pathname === tab.to
                     ? "bg-white/[0.08] text-white"
                     : "text-zinc-400 hover:text-white"
@@ -67,7 +72,7 @@ export function DashboardLayout({
           </nav>
 
           <div className="flex items-center gap-3">
-            <span className="hidden text-xs text-zinc-500 sm:block">{user?.email}</span>
+            <span className="hidden text-xs text-zinc-500 lg:block">{user?.email}</span>
             <button
               type="button"
               onClick={async () => {
@@ -82,7 +87,7 @@ export function DashboardLayout({
               type="button"
               aria-label="Toggle navigation"
               onClick={() => setMenuOpen((v) => !v)}
-              className="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-zinc-300 md:hidden"
+              className="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-zinc-300 sm:hidden"
             >
               Menu
             </button>
@@ -90,7 +95,7 @@ export function DashboardLayout({
         </div>
 
         {menuOpen && (
-          <div className="border-t border-white/[0.07] md:hidden">
+          <div className="border-t border-white/[0.07] sm:hidden">
             {(user?.is_admin ? [...TABS, ADMIN_TAB] : TABS).map((tab) => (
               <Link
                 key={tab.to}
@@ -111,6 +116,7 @@ export function DashboardLayout({
           <div className="mt-10">{children}</div>
         </div>
       </main>
+      <OfflineBanner />
     </div>
   );
 }
@@ -147,17 +153,23 @@ export function StatTile({
   label,
   value,
   detail,
+  loading,
 }: {
   label: string;
   value: string;
   detail?: string;
+  loading?: boolean;
 }) {
   return (
     <div className="glass rounded-2xl p-5">
       <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500">
         {label}
       </p>
-      <p className="mt-2 font-serif text-3xl font-bold tracking-tight text-white">{value}</p>
+      {loading ? (
+        <Skeleton className="mt-2 h-9 w-24" />
+      ) : (
+        <p className="mt-2 font-serif text-3xl font-bold tracking-tight text-white">{value}</p>
+      )}
       {detail && <p className="mt-1 text-xs text-zinc-500">{detail}</p>}
     </div>
   );

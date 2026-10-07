@@ -2,6 +2,7 @@ import { SiteNav } from "@/components/site/SiteNav";
 import { SiteFooter } from "@/components/site/SiteFooter";
 import { AuroraBackground } from "@/components/site/AuroraBackground";
 import { Reveal } from "@/components/site/Reveal";
+import { usePageTitle } from "@/lib/page-title";
 
 const SECTIONS = [
   {
@@ -32,6 +33,7 @@ const SECTIONS = [
       "Each plan includes a monthly runtime allowance. Runtime time is measured while a session is actually running and is enforced on the server. Stopping early bills only the time used.",
       "Paid plans are billed through Whop. Subscriptions renew until cancelled, and access continues until the end of the paid period. You may cancel at any time from the dashboard.",
       "Because runtime time is consumed as it is used, we do not offer refunds for unused quota on a cancelled plan except where required by law.",
+      "Promotional codes are redeemed at Whop checkout and are governed by the terms shown with the promotion, including redemption caps. The discount shown on your billing page is display-only; circumventing a promo's limits (for example by stacking accounts to reuse a single-use code) is treated as quota circumvention.",
     ],
   },
   {
@@ -58,13 +60,14 @@ const SECTIONS = [
   {
     title: "Termination",
     body: [
-      "You may delete your account at any time. We may suspend an account that breaches these terms or where continued operation would create legal or security risk.",
-      "On termination your data is deleted in line with the retention periods described in the privacy documentation.",
+      "You may delete your account at any time from Settings. Deletion stops your running runtimes first, then removes your projects, builds, keys, sessions and preferences immediately.",
+      "On termination your data is deleted in line with the retention periods described in the privacy documentation. Aggregated usage, anonymized billing events and payment records held by Whop survive deletion as described there.",
     ],
   },
 ];
 
 export function TermsPage() {
+  usePageTitle("Terms of Service");
   return (
     <div className="relative min-h-screen bg-zinc-950 text-zinc-100">
       <AuroraBackground />

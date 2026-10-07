@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, setAccessToken } from "@/lib/api";
+import { timeAgo } from "@/lib/time";
 import { useAuth } from "@/lib/auth-context";
 import {
   DashboardLayout,
@@ -246,6 +247,17 @@ export function ApiKeysPage() {
                 k.expires_at !== null &&
                 new Date(k.expires_at).getTime() <= Date.now();
               const working = busyKey === k.id;
+              // A key dying within the week gets an amber deadline rather than
+              // the same grey text as one living for a year — expired keys
+              // break the plugin at the worst moment, silently, at 3am.
+              const remainingMs = k.expires_at
+                ? new Date(k.expires_at).getTime() - Date.now()
+                : null;
+              const expiringSoon =
+                k.is_active &&
+                remainingMs !== null &&
+                remainingMs > 0 &&
+                remainingMs <= 7 * 24 * 60 * 60 * 1000;
 
               return (
                 <li key={k.id} className="flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0">
@@ -261,9 +273,17 @@ export function ApiKeysPage() {
                       {k.key_prefix}…
                     </p>
                     <p className="mt-1 text-xs text-zinc-600">
-                      created {new Date(k.created_at).toLocaleString()}
+                      <span title={new Date(k.created_at).toLocaleString()}>
+                        created {timeAgo(k.created_at)}
+                      </span>
                       {" · "}
-                      {expiryLabel(k.expires_at, k.is_active)}
+                      {expiringSoon ? (
+                        <span className="font-medium text-amber-300">
+                          {expiryLabel(k.expires_at, k.is_active)}
+                        </span>
+                      ) : (
+                        expiryLabel(k.expires_at, k.is_active)
+                      )}
                       {" · "}
                       last used {k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "never"}
                     </p>

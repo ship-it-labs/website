@@ -1,6 +1,7 @@
 import { useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth-context";
+import { usePageTitle } from "@/lib/page-title";
 import {
   AuthLayout,
   AuthLink,
@@ -10,6 +11,7 @@ import {
 } from "@/components/site/AuthLayout";
 
 export function SignupPage() {
+  usePageTitle("Create account");
   const { signUp } = useAuth();
   const navigate = useNavigate();
 

@@ -31,6 +31,67 @@ interface Info {
 
 type Action = "pause" | "resume" | "restart" | "stop";
 
+// Lease counts as "stopping soon" inside this window (10 minutes).
+const STOPPING_SOON_SECONDS = 10 * 60;
+
+// Copies text, falling back to a hidden textarea when the async clipboard API
+// is unavailable. NOTE (Batch 4): consolidate into one useCopy hook.
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    try {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.opacity = "0";
+      document.body.appendChild(area);
+      area.select();
+      const ok = document.execCommand("copy");
+      document.body.removeChild(area);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+}
+
+/** True when the lease expires within the warning window or already stopping. */
+function isStoppingSoon(leaseExpiresAt: string | undefined, status: string, now: number): boolean {
+  if (status === "stopping") return true;
+  if (!leaseExpiresAt) return false;
+  const expires = new Date(leaseExpiresAt).getTime();
+  if (Number.isNaN(expires)) return false;
+  const remaining = (expires - now) / 1000;
+  return remaining > 0 && remaining <= STOPPING_SOON_SECONDS;
+}
+
+/**
+ * Fraction of the session consumed (0..1). Prefers the max-session window so
+ * the bar reads "lease elapsed vs max session"; falls back to the
+ * start-to-lease window when no session limit was reported.
+ */
+function sessionProgress(
+  startedAt: string | undefined,
+  leaseExpiresAt: string | undefined,
+  maxSessionSeconds: number | undefined,
+  now: number
+): number | null {
+  if (!startedAt) return null;
+  const start = new Date(startedAt).getTime();
+  if (Number.isNaN(start)) return null;
+  const elapsed = Math.max(0, (now - start) / 1000);
+  if (maxSessionSeconds && maxSessionSeconds > 0) {
+    return Math.min(1, elapsed / maxSessionSeconds);
+  }
+  if (!leaseExpiresAt) return null;
+  const expires = new Date(leaseExpiresAt).getTime();
+  if (Number.isNaN(expires) || expires <= start) return null;
+  return Math.min(1, elapsed / ((expires - start) / 1000));
+}
+
 const ACTION_LABEL: Record<Action, string> = {
   pause: "Pause",
   resume: "Resume",
@@ -137,7 +198,7 @@ export function RuntimeDetail({
     return () => window.clearInterval(timer);
   }, [load]);
 
-  const act = async (action: Action) => {
+  const act = async (action: Action, retried = false) => {
     setBusy(action);
     setError(null);
     try {
@@ -151,7 +212,25 @@ export function RuntimeDetail({
       await load();
       onChanged();
     } catch (err) {
-      setError(err instanceof Error ? err.message : `Could not ${action} the runtime`);
+      // One automatic retry hides a transient 502 without looping forever.
+      const message = err instanceof Error ? err.message : `Could not ${action} the runtime`;
+      if (!retried && /502|unreachable|bad gateway/i.test(message)) {
+        try {
+          await api.post(`/api/v1/runtimes/${runtimeId}/${action}`, {});
+          if (action === "stop") {
+            onChanged();
+            onClose();
+            return;
+          }
+          await load();
+          onChanged();
+          return;
+        } catch (retryErr) {
+          setError(retryErr instanceof Error ? retryErr.message : message);
+        }
+      } else {
+        setError(message);
+      }
     } finally {
       setBusy(null);
       setConfirmStop(false);
@@ -237,10 +316,30 @@ function RuntimeBody({
   const status = detail.status ?? "unknown";
   const alive = status === "running" || status === "starting" || status === "paused";
   const paused = status === "paused";
+  const stopping = status === "stopping";
   const metrics = info?.metrics;
+  const stoppingSoon = isStoppingSoon(detail.lease_expires_at, status, now);
+  // A stopping runtime is already past "alive", but still deserves the banner.
+  const showStoppingBanner = stoppingSoon && (alive || stopping);
+  const progress = sessionProgress(detail.started_at, detail.lease_expires_at, detail.max_session_seconds, now);
+  const startedAtMs = detail.started_at ? new Date(detail.started_at).getTime() : NaN;
+  // Live uptime from started_at, ticking with the page clock (the parent
+  // passes a `now` that advances every second).
+  const uptimeSeconds = !Number.isNaN(startedAtMs) ? Math.max(0, Math.floor((now - startedAtMs) / 1000)) : null;
+  const appUrl = detail.app_url || info?.app_url;
 
   return (
     <>
+      {showStoppingBanner && (
+        <div className="mb-4 rounded-xl border border-amber-400/25 bg-amber-500/10 px-4 py-3">
+          <p className="text-sm text-amber-200">
+            {stopping
+              ? "This runtime is stopping now."
+              : "Stopping soon: the session lease expires in under 10 minutes."}
+          </p>
+        </div>
+      )}
+
       <div className="mb-6 flex items-center gap-3">
         <StatusDot status={status} />
         <span className="text-sm capitalize text-zinc-300">{status}</span>
@@ -251,17 +350,35 @@ function RuntimeBody({
         )}
       </div>
 
+      {progress !== null && alive && (
+        <div className="mb-6" role="progressbar" aria-valuenow={Math.round(progress * 100)} aria-valuemin={0} aria-valuemax={100} aria-label="Session progress">
+          <div className="flex items-center justify-between text-xs text-zinc-500">
+            <span>Session progress</span>
+            <span className="font-mono tabular-nums">{Math.round(progress * 100)}%</span>
+          </div>
+          <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-white/[0.07]">
+            <div
+              className={`h-full rounded-full transition-[width] ${progress >= 5 / 6 ? "bg-amber-400" : "bg-violet-400"}`}
+              style={{ width: `${Math.round(progress * 100)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
       <dl className="grid gap-x-6 gap-y-4 sm:grid-cols-2">
             <Spec label="Public URL">
-              {detail.app_url ? (
-                <a
-                  href={detail.app_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="break-all text-violet-300 transition-colors hover:text-violet-200"
-                >
-                  {detail.app_url}
-                </a>
+              {appUrl ? (
+                <span className="flex items-start gap-2">
+                  <a
+                    href={appUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="min-w-0 flex-1 break-all text-violet-300 transition-colors hover:text-violet-200"
+                  >
+                    {appUrl}
+                  </a>
+                  <CopyButton text={appUrl} label="Copy URL" />
+                </span>
               ) : (
                 <span className="text-zinc-500">Not published</span>
               )}
@@ -272,7 +389,14 @@ function RuntimeBody({
             </Spec>
             <Spec label="CPU limit">{plan ? `${plan.cpu} CPU` : "—"}</Spec>
             <Spec label="Started">
-              {new Date(detail.started_at).toLocaleString()}
+              {detail.started_at ? new Date(detail.started_at).toLocaleString() : "—"}
+            </Spec>
+            <Spec label="Uptime">
+              {uptimeSeconds !== null ? (
+                <span className="font-mono tabular-nums">{formatDuration(uptimeSeconds)}</span>
+              ) : (
+                "—"
+              )}
             </Spec>
             <Spec label="Session limit">
               {formatDuration(detail.max_session_seconds)}
@@ -365,5 +489,25 @@ function Spec({ label, children }: { label: string; children: React.ReactNode })
       <dt className="text-xs uppercase tracking-wide text-zinc-600">{label}</dt>
       <dd className="mt-1 break-words text-sm text-zinc-300">{children}</dd>
     </div>
+  );
+}
+
+function CopyButton({ text, label }: { text: string; label: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      onClick={async () => {
+        if (await copyText(text)) {
+          setCopied(true);
+          window.setTimeout(() => setCopied(false), 1500);
+        }
+      }}
+      className="shrink-0 rounded-lg bg-white/[0.04] px-2 py-1 text-xs text-zinc-400 transition-colors hover:bg-white/[0.09] hover:text-zinc-200"
+    >
+      {copied ? "Copied" : label}
+    </button>
   );
 }

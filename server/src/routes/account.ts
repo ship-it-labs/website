@@ -3,7 +3,9 @@ import { z } from "zod";
 import { supabase, usingSqlite } from "../db/index.js";
 import { authenticateApiKey } from "../middleware/auth.js";
 import { callOrchestrator } from "../services/orchestrator-client.js";
-import { revokeAllSessions, revokeSessionRow } from "../services/sessions.js";
+import { revokeAllSessions, revokeSessionRow, hashSessionToken } from "../services/sessions.js";
+import { checkRateLimit } from "../services/rate-limit.js";
+import { isCommonPassword } from "../utils/passwords.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -144,6 +146,12 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
       });
     }
 
+    if (isCommonPassword(parsed.data.new_password)) {
+      return reply.status(400).send({
+        error: { code: "WEAK_PASSWORD", message: "That password is too common. Choose something less guessable." },
+      });
+    }
+
     const email = await authEmail(req.auth!.userId);
     if (!email || !(await passwordCorrect(email, parsed.data.current_password))) {
       // Deliberately the same response as a bad login: confirming which half
@@ -254,18 +262,70 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
   });
 
   app.get("/account/sessions", async (req, reply) => {
+    // Remembered rows have no driver expiry behind them, so dead ones would
+    // pile up forever. Anything untouched for 30 days is pruned lazily here,
+    // on the one endpoint that reads the list, rather than by a new worker.
+    const staleBefore = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+    await supabase
+      .from("user_sessions")
+      .delete()
+      .eq("user_id", req.auth!.userId)
+      .lt("last_seen_at", staleBefore);
+
     const { data } = await supabase
       .from("user_sessions")
-      .select("id, user_agent, ip, created_at, last_seen_at")
+      .select("id, token_hash, user_agent, ip, created_at, last_seen_at")
       .eq("user_id", req.auth!.userId)
       .order("created_at", { ascending: false })
       .limit(50);
 
-    return reply.send({ sessions: data ?? [] });
+    // The current device is marked server-side by matching the presented
+    // token's hash. The page used to assume the newest row was this device,
+    // which mislabeled everything whenever another login landed in between.
+    // Hashes never leave the server: they are compared, then stripped.
+    const currentHash = hashSessionToken(bearerToken(req));
+    const rows = ((data ?? []) as {
+      id: string;
+      token_hash?: string;
+      user_agent: string | null;
+      ip: string | null;
+      created_at: string;
+      last_seen_at: string;
+    }[]);
+
+    // last_seen_at is otherwise write-never, which would make the 30-day prune
+    // above evict devices that are still in daily use. Touching the current
+    // row here keeps it meaningful without a write on every request.
+    const current = rows.find((row) => row.token_hash === currentHash);
+    if (current) {
+      await supabase
+        .from("user_sessions")
+        .update({ last_seen_at: new Date().toISOString() })
+        .eq("id", current.id);
+      current.last_seen_at = new Date().toISOString();
+    }
+
+    const sessions = rows.map(({ token_hash, ...session }) => ({
+      ...session,
+      current: typeof token_hash === "string" && token_hash === currentHash,
+    }));
+
+    return reply.send({ sessions });
   });
 
   app.delete("/account/sessions/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
+
+    // Read the row before deleting so the driver session below is only killed
+    // when the caller just revoked the device they are on. The old code ended
+    // the caller's own login no matter which row was deleted, signing people
+    // out for tidying up a forgotten laptop.
+    const { data: target } = await supabase
+      .from("user_sessions")
+      .select("token_hash")
+      .eq("id", id)
+      .eq("user_id", req.auth!.userId)
+      .single();
     const removed = await revokeSessionRow(req.auth!.userId, id);
 
     if (!removed) {
@@ -287,7 +347,10 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
       // clear from the list while their tokens run out their week. "Sign out
       // everywhere" below is the control that actually ends them.
       const token = bearerToken(req);
-      if (token) client.revokeLocalSession?.(token);
+      const row = (target ?? null) as { token_hash?: string } | null;
+      if (token && row?.token_hash === hashSessionToken(token)) {
+        client.revokeLocalSession?.(token);
+      }
     }
 
     return reply.send({ success: true });
@@ -315,6 +378,20 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
   });
 
   app.delete("/account", async (req, reply) => {
+    // Five deletions per minute per IP: the password check already slows a
+    // targeted attack, but without this an anonymous caller can burn CPU on
+    // scrypt password checks and orchestrator listings without limit.
+    const limit = checkRateLimit(`account:delete:${req.ip}`, 5, 60_000);
+    if (!limit.allowed) {
+      return reply.status(429).send({
+        error: {
+          code: "RATE_LIMITED",
+          message: "Too many attempts. Wait a moment and try again.",
+          retry_after_seconds: limit.retryAfterSeconds,
+        },
+      });
+    }
+
     const parsed = deleteSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return reply.status(400).send({

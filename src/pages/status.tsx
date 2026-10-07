@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/lib/api";
+import { timeAgo } from "@/lib/time";
+import { usePageTitle } from "@/lib/page-title";
 import { SiteNav } from "@/components/site/SiteNav";
 import { SiteFooter } from "@/components/site/SiteFooter";
 import { AuroraBackground } from "@/components/site/AuroraBackground";
+import { Skeleton } from "@/components/site/Skeleton";
 
 function StatePill({ ok }: { ok: boolean }) {
   return (
@@ -41,7 +44,7 @@ function ServiceRow({
         <p className="mt-0.5 text-sm text-zinc-500">{detail}</p>
       </div>
       {ok === null ? (
-        <span className="text-sm text-zinc-600">Checking…</span>
+        <Skeleton className="h-6 w-24 shrink-0" />
       ) : (
         <StatePill ok={ok} />
       )}
@@ -50,6 +53,7 @@ function ServiceRow({
 }
 
 export function StatusPage() {
+  usePageTitle("Status");
   const [status, setStatus] = useState<PlatformStatus | null>(null);
   const [error, setError] = useState(false);
 
@@ -101,8 +105,13 @@ export function StatusPage() {
               />
             </ul>
             {status && !error && (
-              <p className="mt-4 text-xs text-zinc-600">
-                Checked {new Date(status.time).toLocaleString()}
+              // Relative age at a glance, absolute timestamp on hover — the
+              // same pattern as the dashboard's "last used" labels.
+              <p
+                className="mt-4 text-xs text-zinc-600"
+                title={new Date(status.time).toLocaleString()}
+              >
+                Checked {timeAgo(status.time)}
               </p>
             )}
             {error && (

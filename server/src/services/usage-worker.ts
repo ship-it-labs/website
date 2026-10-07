@@ -5,6 +5,43 @@ import { Runtime } from "../types/index.js";
 
 const EXPIRY_CHECK_INTERVAL_MS = 30_000;
 
+/** Lease counts as "stopping soon" inside this window (10 minutes). */
+export const STOPPING_SOON_MS = 10 * 60_000;
+
+/**
+ * True when the lease expires within the warning window, or the runtime is
+ * already stopping. Drives the "stopping soon" banner.
+ */
+export function isStoppingSoon(
+  leaseExpiresAt: string | null | undefined,
+  status: string | null | undefined,
+  nowMs = Date.now()
+): boolean {
+  if (status === "stopping") return true;
+  if (!leaseExpiresAt) return false;
+  const expires = new Date(leaseExpiresAt).getTime();
+  if (Number.isNaN(expires)) return false;
+  const remaining = expires - nowMs;
+  return remaining > 0 && remaining <= STOPPING_SOON_MS;
+}
+
+/**
+ * Fraction of the session consumed (0..1), from start to lease expiry.
+ * Null when the window is unknowable, so the bar hides instead of guessing.
+ */
+export function sessionProgress(
+  startedAt: string | null | undefined,
+  leaseExpiresAt: string | null | undefined,
+  nowMs = Date.now()
+): number | null {
+  if (!startedAt || !leaseExpiresAt) return null;
+  const start = new Date(startedAt).getTime();
+  const expires = new Date(leaseExpiresAt).getTime();
+  if (Number.isNaN(start) || Number.isNaN(expires) || expires <= start) return null;
+  const progress = (nowMs - start) / (expires - start);
+  return Math.min(1, Math.max(0, progress));
+}
+
 function billRuntime(runtime: Runtime): void {
   if (!runtime.started_at) return;
 

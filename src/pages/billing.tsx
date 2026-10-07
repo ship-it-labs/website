@@ -24,6 +24,7 @@ interface Plan {
 interface Subscription {
   id: string;
   plan_id: string;
+  promo_code?: string | null;
   status: string;
   current_period_end: string | null;
   cancel_at_period_end: boolean | number | null;
@@ -49,7 +50,8 @@ type CardAction =
  */
 function actionFor(
   plan: Plan,
-  subscription: Subscription | null
+  subscription: Subscription | null,
+  currentPriceCents: number | null
 ): CardAction {
   const activePaid =
     subscription &&
@@ -73,7 +75,15 @@ function actionFor(
     return { kind: "subscribe" };
   }
 
+  // Moving between live paid tiers: up costs money now, down costs nothing
+  // until the period ends. The two paths differ — an upgrade opens a fresh
+  // checkout (the webhook retires the old membership at period end, so paid
+  // days are never taken twice), while a downgrade goes through an explicit
+  // choice, because either path ends the current tier.
   if (plan.price_cents === 0) return { kind: "downgrade", plan };
+  if (currentPriceCents !== null && plan.price_cents > currentPriceCents) {
+    return { kind: "upgrade", plan };
+  }
   return { kind: "downgrade", plan };
 }
 
@@ -179,6 +189,17 @@ export function BillingPage() {
                   </>
                 )}
               </p>
+              {!cancelScheduled && endsAt && !Number.isNaN(endsAt.getTime()) && (
+                <p className="mt-1.5 text-sm text-zinc-300">
+                  Next charge: {money(currentPlan.price_cents)} on{" "}
+                  {endsAt.toLocaleDateString()}
+                </p>
+              )}
+              {subscription.promo_code && (
+                <p className="mt-1.5 text-xs text-emerald-300/90">
+                  Discount applied with code {subscription.promo_code}.
+                </p>
+              )}
               {cancelScheduled && (
                 <p className="mt-1.5 text-xs text-amber-300/90">
                   Cancels at the end of the period. Access continues until then,
@@ -202,8 +223,11 @@ export function BillingPage() {
                   Manage in Whop
                 </a>
               )}
-              {!cancelScheduled && subscription.status === "active" && (
-                confirmCancel ? (
+              {!cancelScheduled &&
+                (subscription.status === "active" ||
+                  subscription.status === "past_due" ||
+                  subscription.status === "trialing") &&
+                (confirmCancel ? (
                   <span className="flex items-center gap-2">
                     <button
                       type="button"
@@ -250,7 +274,7 @@ export function BillingPage() {
           <PromoNote className="mb-6" />
           <div className="grid gap-5 md:grid-cols-3">
           {plans.map((plan) => {
-            const action = actionFor(plan, subscription);
+            const action = actionFor(plan, subscription, currentPlan?.price_cents ?? null);
             return (
               <article
                 key={plan.id}
@@ -303,14 +327,20 @@ export function BillingPage() {
                   </button>
                 )}
                 {action.kind === "upgrade" && (
-                  <button
-                    type="button"
-                    onClick={() => checkout(action.plan.id)}
-                    disabled={busy === action.plan.id}
-                    className="mt-7 w-full rounded-xl bg-white px-5 py-2.5 text-sm font-medium text-zinc-950 transition-transform duration-200 hover:scale-[1.02] disabled:opacity-60"
-                  >
-                    {busy === action.plan.id ? "Working…" : `Upgrade to ${action.plan.name}`}
-                  </button>
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => checkout(action.plan.id)}
+                      disabled={busy === action.plan.id}
+                      className="mt-7 w-full rounded-xl bg-white px-5 py-2.5 text-sm font-medium text-zinc-950 transition-transform duration-200 hover:scale-[1.02] disabled:opacity-60"
+                    >
+                      {busy === action.plan.id ? "Working…" : `Upgrade to ${action.plan.name}`}
+                    </button>
+                    <p className="mt-2 text-xs text-zinc-600">
+                      Billed immediately in Whop. Your current plan runs until
+                      the end of its period — paid days are never charged twice.
+                    </p>
+                  </>
                 )}
                 {action.kind === "downgrade" && (
                   <button

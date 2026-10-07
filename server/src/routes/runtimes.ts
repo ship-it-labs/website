@@ -13,6 +13,46 @@ const startSchema = z.object({
 // How long the agent may hold the archive link. The download begins
     // immediately on start, so this only needs to survive a slow queue.
 const SOURCE_URL_TTL_SECONDS = 15 * 60;
+/**
+ * The 404 shape every unknown runtime id uses. A single code lets callers
+ * branch on "missing" without enumerating per-resource variants.
+ */
+export function notFound(message: string): { error: { code: string; message: string } } {
+  return { error: { code: "NOT_FOUND", message } };
+}
+
+/**
+ * Adds the project name to each runtime row. The orchestrator only knows ids,
+ * while the name lives in this process's own store, so the join happens here.
+ * Unknown projects keep the id and get no name rather than dropping the row.
+ */
+export function attachProjectNames<T extends { project_id?: string }>(
+  runtimes: T[],
+  projects: { id: string; name: string }[]
+): (T & { project_name: string | null })[] {
+  const names = new Map(projects.map((p) => [p.id, p.name]));
+  return runtimes.map((r) => ({
+    ...r,
+    project_name: (r.project_id && names.get(r.project_id)) ?? null,
+  }));
+}
+
+async function projectNamesFor(userId: string): Promise<{ id: string; name: string }[]> {
+  try {
+    const { data } = await supabase
+      .from("projects")
+      .select("id, name")
+      .eq("user_id", userId);
+    return (data ?? []) as { id: string; name: string }[];
+  } catch {
+    // Names are decoration: a lookup failure still lists the runtimes.
+    return [];
+  }
+}
+
+// Passed as the 4th arg to callOrchestrator for start/stop/restart: one
+// automatic retry when the orchestrator never answered, before the 502.
+const WITH_SINGLE_502_RETRY = { retryUnavailableOnce: true } as const;
 
 export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authenticateApiKey);
@@ -78,7 +118,7 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
           cpu: Number(req.auth!.plan.cpu),
           plan_id: req.auth!.plan.id,
         },
-      });
+      }, 30_000, WITH_SINGLE_502_RETRY);
 
       return reply.status(202).send(result);
     } catch (err) {
@@ -112,16 +152,56 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/runtimes", async (req, reply) => {
     try {
-      const result = await callOrchestrator<{ runtimes: unknown[] }>("/runtime/list", {
+      const result = await callOrchestrator<{ runtimes: { project_id?: string }[] }>("/runtime/list", {
         user_id: req.auth!.userId,
       });
-      return reply.send(result);
+      // Resolve project names for the rows; the list still succeeds if the
+      // lookup fails, just without names.
+      const projects = await projectNamesFor(req.auth!.userId);
+      return reply.send({ runtimes: attachProjectNames(result.runtimes ?? [], projects) });
     } catch (err) {
       logger.error({ err }, "Orchestrator list failed");
       return reply.status(502).send({
         error: { code: "ORCHESTRATOR_UNREACHABLE", message: "Runtime orchestrator unreachable" },
       });
     }
+  });
+
+  // Stops every runtime the caller owns. Listed first via the caller's own
+  // user_id, so one account can never stop another's runtimes. Per-runtime
+  // failures are reported, not thrown: a partial stop is still useful.
+  app.post("/runtimes/stop-all", async (req, reply) => {
+    const userId = req.auth!.userId;
+    let ids: string[];
+    try {
+      const listed = await callOrchestrator<{ runtimes: { runtime_id?: string; id?: string }[] }>(
+        "/runtime/list",
+        { user_id: userId }
+      );
+      ids = (listed.runtimes ?? [])
+        .map((r) => r.runtime_id ?? r.id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+    } catch (err) {
+      logger.error({ err }, "Orchestrator list failed for stop-all");
+      return reply.status(502).send({
+        error: { code: "ORCHESTRATOR_UNREACHABLE", message: "Runtime orchestrator unreachable" },
+      });
+    }
+
+    const stopped: string[] = [];
+    const failed: { id: string; error: string }[] = [];
+    for (const id of ids) {
+      try {
+        await callOrchestrator("/runtime/stop", { runtime_id: id, user_id: userId });
+        stopped.push(id);
+      } catch (err) {
+        failed.push({
+          id,
+          error: err instanceof OrchestratorError ? err.message : "Stop failed",
+        });
+      }
+    }
+    return reply.send({ stopped, failed });
   });
 
   app.get("/runtimes/:id", async (req, reply) => {
@@ -134,9 +214,7 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
       return reply.send(result);
     } catch (err) {
       if (err instanceof OrchestratorError && err.code === "RUNTIME_NOT_FOUND") {
-        return reply.status(404).send({
-          error: { code: "RUNTIME_NOT_FOUND", message: "Runtime not found" },
-        });
+        return reply.status(404).send(notFound("Runtime not found"));
       }
       logger.error({ err, runtimeId: id }, "Orchestrator status failed");
       return reply.status(502).send({
@@ -150,17 +228,18 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
   for (const action of simpleActions) {
     app.post(`/runtimes/:id/${action}`, async (req, reply) => {
       const { id } = req.params as { id: string };
+      // start/stop/restart get one automatic retry on an unreachable
+      // orchestrator; the rest (logs/info/health/pause/resume) surface it.
+      const retry = action === "stop" || action === "restart" ? WITH_SINGLE_502_RETRY : undefined;
       try {
         const result = await callOrchestrator<unknown>(`/runtime/${action}`, {
           runtime_id: id,
           user_id: req.auth!.userId,
-        });
+        }, 30_000, retry);
         return reply.send(result);
       } catch (err) {
         if (err instanceof OrchestratorError && err.code === "RUNTIME_NOT_FOUND") {
-          return reply.status(404).send({
-            error: { code: "RUNTIME_NOT_FOUND", message: "Runtime not found" },
-          });
+          return reply.status(404).send(notFound("Runtime not found"));
         }
         if (err instanceof OrchestratorError && isCallerError(err.code)) {
           return reply.status(409).send({
@@ -196,6 +275,11 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
         });
         return reply.send(result);
       } catch (err) {
+        // Unknown ids are always a 404 with the shared shape, even on these
+        // secondary actions, so callers branch on one missing code.
+        if (err instanceof OrchestratorError && err.code === "RUNTIME_NOT_FOUND") {
+          return reply.status(404).send(notFound("Runtime not found"));
+        }
         // A rejected request is not an unreachable orchestrator. Collapsing every
         // failure into 502 reported a bad argument as a dead service, which sent
         // people looking in the wrong place.

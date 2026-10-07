@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/lib/auth-context";
 import {
@@ -19,6 +19,19 @@ export function LoginPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Shown once after a revoked or expired session bounces here: without it the
+  // login page reads as "you were logged out for no reason".
+  useEffect(() => {
+    try {
+      if (sessionStorage.getItem("shipit.session_expired") === "1") {
+        sessionStorage.removeItem("shipit.session_expired");
+        setNotice("Your session expired. Sign in again.");
+      }
+    } catch {
+      // No storage available; nothing to show.
+    }
+  }, []);
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();

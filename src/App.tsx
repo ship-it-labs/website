@@ -19,6 +19,8 @@ import { HomePage } from "@/pages/home";
 import { PricingPage } from "@/pages/pricing";
 import { DocsPage } from "@/pages/docs";
 import { TermsPage } from "@/pages/terms";
+import { NotFoundPage } from "@/pages/not-found";
+import { RouteRoot } from "@/components/site/RouteErrorBoundary";
 
 function Protected({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
@@ -94,7 +96,7 @@ export function App() {
           </Protected>
         }
       />
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="*" element={<NotFoundPage />} />
     </Routes>
   );
 }
@@ -103,7 +105,11 @@ export function Root() {
   return (
     <BrowserRouter>
       <AuthProvider>
-        <App />
+        {/* Keyed on the pathname inside, so a page crash clears on navigate
+            and one broken route never traps the whole app. */}
+        <RouteRoot>
+          <App />
+        </RouteRoot>
       </AuthProvider>
     </BrowserRouter>
   );

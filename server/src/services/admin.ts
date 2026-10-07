@@ -1,4 +1,5 @@
 import { supabase, type Database } from "../db/index.js";
+import crypto from "node:crypto";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -63,4 +64,93 @@ export async function isAdminUser(user: AdminUser, db: Database = supabase): Pro
 export async function requireAdminUser(user: AdminUser | null): Promise<boolean> {
   if (!user) return false;
   return isAdminUser(user);
+}
+
+export interface AdminAuditEntry {
+  adminId: string;
+  action: string;
+  target?: string | null;
+  detail?: string | null;
+}
+
+/**
+ * Appends one row to the admin audit log. Defensive by design: migration 0013
+ * may not be wired into schema.ts / PROD_SETUP.sql yet (a sibling owns those),
+ * in which case the insert fails and the caller's request must still succeed.
+ * A missing table logs one warning and resolves; anything else is the caller's
+ * problem only in the sense that it is logged, never thrown.
+ */
+export async function recordAdminAudit(
+  db: Database,
+  entry: AdminAuditEntry
+): Promise<void> {
+  try {
+    const { error } = await db.from("admin_audit").insert({
+      // Generated here rather than defaulted in SQL so SQLite and Postgres
+      // accept the same row: neither schema needs a uuid generator.
+      id: crypto.randomUUID(),
+      admin_id: entry.adminId,
+      action: entry.action,
+      target: entry.target ?? null,
+      detail: entry.detail ?? null,
+      created_at: new Date().toISOString(),
+    });
+    if (error) {
+      logger.warn(
+        { err: error, action: entry.action },
+        "Admin audit write failed; request continues unaudited"
+      );
+    }
+  } catch (err) {
+    logger.warn({ err, action: entry.action }, "Admin audit write threw; request continues unaudited");
+  }
+}
+
+/** CSV-escapes one cell: quotes, commas and newlines are wrapped in quotes. */
+export function csvCell(value: unknown): string {
+  const text = value === null || value === undefined ? "" : String(value);
+  return /[",\n\r]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+/** Builds a CSV document from headers plus rows of cells. Pure and testable. */
+export function toCsv(headers: string[], rows: unknown[][]): string {
+  const lines = [headers.map(csvCell).join(",")];
+  for (const row of rows) lines.push(row.map(csvCell).join(","));
+  return `${lines.join("\r\n")}\r\n`;
+}
+
+/**
+ * True when agent capacity is low: at or above the threshold of slots used.
+ * Zero known slots is not "low", it is "unknown" (manager unreachable or no
+ * agents), and must not raise the banner — otherwise every manager outage
+ * also reads as a capacity crunch.
+ */
+export function isCapacityLow(totalUsed: number, totalMax: number, threshold = 0.8): boolean {
+  if (totalMax <= 0) return false;
+  return totalUsed / totalMax >= threshold;
+}
+
+/** Platform-wide pause on new runtime starts. Stored as JSON "true"/"false". */
+export async function isMaintenanceMode(db: Database = supabase): Promise<boolean> {
+  try {
+    const { data } = await db
+      .from("platform_settings")
+      .select("value")
+      .eq("key", "maintenance_mode")
+      .single();
+    if (!data) return false;
+    const raw = (data as { value: unknown }).value;
+    if (typeof raw === "string") {
+      try {
+        return JSON.parse(raw) === true;
+      } catch {
+        return raw === "true";
+      }
+    }
+    return raw === true;
+  } catch (err) {
+    // Fail open: a settings read failure must not take the platform down.
+    logger.warn({ err }, "Maintenance-mode check failed; assuming platform is open");
+    return false;
+  }
 }

@@ -3,6 +3,8 @@ import { SiteNav } from "@/components/site/SiteNav";
 import { SiteFooter } from "@/components/site/SiteFooter";
 import { AuroraBackground } from "@/components/site/AuroraBackground";
 import { Reveal } from "@/components/site/Reveal";
+import { CopyButton } from "@/components/site/CopyButton";
+import { usePageTitle } from "@/lib/page-title";
 import { cn } from "@/lib/utils";
 
 interface Section {
@@ -87,6 +89,7 @@ const TOOL_GROUPS = [
 ];
 
 export function DocsPage() {
+  usePageTitle("Documentation");
   const [active, setActive] = useState(SECTIONS[0].id);
 
   return (
@@ -163,13 +166,7 @@ export function DocsPage() {
                             <code className="flex-1 truncate font-mono text-xs text-zinc-300">
                               {value}
                             </code>
-                            <button
-                              type="button"
-                              onClick={() => navigator.clipboard?.writeText(value)}
-                              className="shrink-0 rounded-lg border border-white/10 px-2.5 py-1 text-[11px] text-zinc-400 transition-colors hover:border-white/25 hover:text-white"
-                            >
-                              Copy
-                            </button>
+                            <CopyButton text={value} />
                           </div>
                         ))}
                       </div>

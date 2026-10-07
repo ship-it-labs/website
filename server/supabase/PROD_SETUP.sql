@@ -444,3 +444,21 @@ create table if not exists public.env_overrides (
   primary key (key, environment)
 );
 ;
+-- ============================================================================
+-- migrations/0011_subscription_promo.sql
+-- ============================================================================
+-- Discount code carried on the Whop membership, when Whop includes one.
+-- Display-only: the billing page acknowledges the promo, and nothing prices
+-- from this column. Nullable because most purchases are full price.
+alter table public.subscriptions
+  add column if not exists promo_code text;
+;
+-- ============================================================================
+-- migrations/0012_build_executor.sql
+-- ============================================================================
+-- Which executor ran each build ("github" or "runtime"). Display-only: the
+-- dashboard shows where a build ran, and nothing dispatches from this column.
+-- Nullable because builds created before executors were recorded have no value.
+alter table public.builds
+  add column if not exists executor text;
+;

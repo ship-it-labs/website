@@ -1,6 +1,8 @@
 import { ProsePage, ProseSection } from "@/components/site/ProsePage";
+import { usePageTitle } from "@/lib/page-title";
 
 export function PrivacyPage() {
+  usePageTitle("Privacy Policy");
   return (
     <ProsePage
       title="Privacy Policy"
@@ -31,8 +33,9 @@ export function PrivacyPage() {
         <p>
           <strong className="text-zinc-200">Payment data:</strong> handled
           entirely by Whop as the merchant of record. We store the subscription
-          state (tier, status, renewal date) and nothing about your card or
-          bank. Whop's own privacy policy governs the payment itself.
+          state (tier, status, renewal date, and any promo code you redeemed
+          so the billing page can show the discount) and nothing about your
+          card or bank. Whop's own privacy policy governs the payment itself.
         </p>
       </ProseSection>
 
@@ -56,11 +59,14 @@ export function PrivacyPage() {
 
       <ProseSection title="Retention and deletion">
         <p>
-          Usage months and anonymized billing events are kept for accounting.
+          Usage months, anonymized billing events and bare webhook delivery
+          records (no account attached) are kept for accounting and fraud
+          review. Login sessions idle for 30 days are pruned automatically.
           Everything else dies with the account: Settings → Danger zone removes
           your projects, builds, keys, sessions and preferences immediately,
-          and stops running runtimes. Payment records remain with Whop under
-          their retention rules.
+          and stops running runtimes first so nothing keeps billing a deleted
+          account. Payment records remain with Whop under their retention
+          rules.
         </p>
       </ProseSection>
 

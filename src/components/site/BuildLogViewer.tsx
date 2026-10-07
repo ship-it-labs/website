@@ -31,6 +31,32 @@ export function BuildLogViewer({
   const [error, setError] = useState<string | null>(null);
   const [follow, setFollow] = useState(true);
   const [filter, setFilter] = useState("");
+  const [copied, setCopied] = useState(false);
+
+  // Plain-text download of the full (unfiltered) log, one line per row.
+  const downloadLogs = () => {
+    const text = (logs ?? []).map((line) => line.content).join("\n");
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${buildId}.log`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const copyBuildId = async () => {
+    try {
+      await navigator.clipboard.writeText(buildId);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard unavailable (non-secure context): the id is already visible
+      // in the title, so there is nothing else to fall back to here.
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -106,15 +132,35 @@ export function BuildLogViewer({
           aria-label="Filter build output"
           className="w-full max-w-xs rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none"
         />
-        <label className="flex items-center gap-2 text-xs text-zinc-500">
-          <input
-            type="checkbox"
-            checked={follow}
-            onChange={(event) => setFollow(event.target.checked)}
-            className="accent-violet-500"
-          />
-          Follow output
-        </label>
+        <span className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={copyBuildId}
+            title="Copy build id"
+            aria-label="Copy build id"
+            className="rounded-lg bg-white/[0.04] px-3 py-2 text-xs text-zinc-400 transition-colors hover:bg-white/[0.09] hover:text-zinc-200"
+          >
+            {copied ? "Copied" : "Copy id"}
+          </button>
+          <button
+            type="button"
+            onClick={downloadLogs}
+            disabled={!logs || logs.length === 0}
+            title="Download logs as plain text"
+            className="rounded-lg bg-white/[0.04] px-3 py-2 text-xs text-zinc-400 transition-colors hover:bg-white/[0.09] hover:text-zinc-200 disabled:opacity-50"
+          >
+            Download logs
+          </button>
+          <label className="flex items-center gap-2 text-xs text-zinc-500">
+            <input
+              type="checkbox"
+              checked={follow}
+              onChange={(event) => setFollow(event.target.checked)}
+              className="accent-violet-500"
+            />
+            Follow output
+          </label>
+        </span>
       </div>
 
       {error ? (

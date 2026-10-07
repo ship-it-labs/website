@@ -1,7 +1,9 @@
 import { Link } from "react-router-dom";
 import { ProsePage, ProseSection } from "@/components/site/ProsePage";
+import { usePageTitle } from "@/lib/page-title";
 
 export function ContactPage() {
+  usePageTitle("Contact support");
   return (
     <ProsePage
       title="Contact support"

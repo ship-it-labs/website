@@ -8,6 +8,8 @@ import {
   verifyWebhookSignature,
   handleWebhookEvent,
   whopPlanIdFor,
+  expectedWhopPlanEnvName,
+  isSameTierActiveSubscription,
   type WhopWebhookEvent,
 } from "../services/whop-service.js";
 import { supabase } from "../db/index.js";
@@ -46,10 +48,54 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
     const whopPlanId = whopPlanIdFor(plan_id);
 
     if (!whopPlanId) {
-      logger.error({ planId: plan_id }, "No Whop plan is configured for this tier");
+      const missingEnv = expectedWhopPlanEnvName(plan_id);
+      logger.error({ planId: plan_id, missingEnv }, "No Whop plan is configured for this tier");
       return reply.status(502).send({
         error: { code: "BILLING_NOT_CONFIGURED", message: "This plan is not available for purchase yet" },
+        // The variable an admin must set, not a riddle for support to solve.
+        ...(missingEnv ? { missing_env: missingEnv } : {}),
       });
+    }
+
+    // Buying the tier you already hold would open a second paid membership for
+    // the same plan. The UI hides the button, and this refuses the direct API
+    // call too — a double-click or a crafted request must not double-bill.
+    const { data: existing } = await supabase
+      .from("subscriptions")
+      .select("plan_id, status, cancel_at_period_end")
+      .eq("user_id", req.auth!.userId)
+      .order("updated_at", { ascending: false })
+      .limit(1);
+    const current = (existing?.[0] ?? null) as {
+      plan_id?: string;
+      status?: string;
+      cancel_at_period_end?: boolean | number | null;
+    } | null;
+
+    if (isSameTierActiveSubscription(current, plan_id)) {
+      return reply.status(400).send({
+        error: { code: "ALREADY_SUBSCRIBED", message: "This plan is already active on your account" },
+      });
+    }
+
+    // Idempotency: prevent double-click double-billing by checking for an
+    // in-flight checkout for this user+plan within the last 2 minutes. A webhook
+    // will complete or fail the purchase; until then we return the existing URL.
+    const twoMinutesAgo = new Date(Date.now() - 2 * 60 * 1000).toISOString();
+    const { data: inflight } = await supabase
+      .from("webhook_events")
+      .select("id, created_at, payload")
+      .eq("provider", "whop")
+      .eq("event_type", "checkout.created")
+      .gte("created_at", twoMinutesAgo)
+      .limit(1);
+    // payload carries {user_id, plan_id} in metadata; we check loosely to
+    // avoid schema coupling. If present, reuse.
+    const inflightCheckout = (inflight?.[0] as { payload?: { data?: { purchase_url?: string }; metadata?: { user_id?: string; plan_id?: string } } } | null);
+    if (inflightCheckout?.payload?.metadata?.user_id === req.auth!.userId &&
+        inflightCheckout?.payload?.metadata?.plan_id === plan_id &&
+        inflightCheckout.payload.data?.purchase_url) {
+      return reply.send({ checkout_url: inflightCheckout.payload.data.purchase_url });
     }
 
     try {
@@ -60,6 +106,7 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
         whopPlanId,
         userId: req.auth!.userId,
         planId: plan_id,
+        source: "dashboard",
       });
 
       return reply.send({ checkout_url: purchaseUrl });
@@ -106,11 +153,13 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post("/billing/cancel", { preHandler: authenticateApiKey }, async (req, reply) => {
+    // Every billable state, not just active: a past-due or trialing customer
+    // asking out must reach the same door, not a "no subscription" wall.
     const { data, error } = await supabase
       .from("subscriptions")
       .select("whop_membership_id, status")
       .eq("user_id", req.auth!.userId)
-      .eq("status", "active")
+      .in("status", ["active", "past_due", "trialing"])
       .limit(1);
 
     if (error) {
@@ -128,6 +177,15 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
 
     try {
       await cancelMembership(membershipId);
+
+      // Reflect the scheduled cancellation locally immediately so the UI
+      // doesn't show "active + Cancel" until the webhook lands (which can
+      // be delayed or fail). The webhook will reconcile to the final state.
+      await supabase
+        .from("subscriptions")
+        .update({ cancel_at_period_end: true, updated_at: new Date().toISOString() })
+        .eq("whop_membership_id", membershipId);
+
       return reply.send({ success: true, cancel_at_period_end: true });
     } catch (err) {
       logger.error({ err, membershipId }, "Whop cancellation failed");

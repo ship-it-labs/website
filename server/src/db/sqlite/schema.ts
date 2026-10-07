@@ -31,6 +31,12 @@ const ADDED_COLUMNS: { table: string; column: string; definition: string }[] = [
   // Sale pricing: a tagline plus the pre-discount price shown crossed out.
   { table: "plans", column: "note", definition: "text" },
   { table: "plans", column: "previous_price_cents", definition: "integer" },
+  // Discount code from the Whop membership. Nullable: most purchases are full
+  // price, and the column is display-only.
+  { table: "subscriptions", column: "promo_code", definition: "text" },
+  // Which executor ran each build ("github" or "runtime"). Nullable because
+  // builds created before executors were recorded have no value.
+  { table: "builds", column: "executor", definition: "text" },
 ];
 
 /** Columns removed from the schema, dropped from existing databases. */
@@ -126,6 +132,7 @@ create table if not exists subscriptions (
   plan_id text not null,
   whop_membership_id text not null unique,
   whop_plan_id text,
+  promo_code text,
   status text not null,
   current_period_end text,
   cancel_at_period_end integer not null default 0,
@@ -172,6 +179,7 @@ create table if not exists builds (
   workflow_run_id text,
   exit_code integer,
   timeout_seconds integer not null default 180,
+  executor text,
   started_at text,
   completed_at text,
   created_at text not null default (datetime('now'))

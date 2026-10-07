@@ -71,6 +71,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           const dead =
             err instanceof ApiError && (err.status === 401 || err.status === 403);
           if (dead) {
+            // A revoked session lands on the login page with no explanation.
+            // Leave a note for it: the page shows it once, then clears it.
+            if (err instanceof ApiError && err.code === "SESSION_REVOKED") {
+              try {
+                sessionStorage.setItem("shipit.session_expired", "1");
+              } catch {
+                // Private mode without storage still signs in fine.
+              }
+            }
             if (!cancelled) setAccessToken(null);
             return;
           }

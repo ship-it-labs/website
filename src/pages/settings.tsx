@@ -14,6 +14,7 @@ interface Session {
   ip: string | null;
   created_at: string;
   last_seen_at: string;
+  current: boolean;
 }
 
 interface Preferences {
@@ -271,7 +272,7 @@ function SessionsSection({
       ) : (
         <>
           <ul className="divide-y divide-white/[0.06]">
-            {sessions.map((session, index) => (
+            {sessions.map((session) => (
               <li
                 key={session.id}
                 className="flex items-center justify-between gap-4 py-3.5 first:pt-0 last:pb-0"
@@ -279,7 +280,7 @@ function SessionsSection({
                 <div className="min-w-0">
                   <p className="truncate text-sm text-zinc-200">
                     {session.user_agent || "Unknown device"}
-                    {index === 0 && (
+                    {session.current && (
                       <span className="ml-2 rounded-md bg-white/[0.08] px-1.5 py-0.5 text-[11px] text-zinc-300">
                         this device
                       </span>

@@ -10,8 +10,33 @@ interface OrchestratorResponse<T> {
 export async function callOrchestrator<T>(
   path: string,
   payload: unknown,
-  timeoutMs = 30_000
+  timeoutMs = 30_000,
+  options?: { retryUnavailableOnce?: boolean }
 ): Promise<T> {
+  try {
+    return await doCall<T>(path, payload, timeoutMs);
+  } catch (err) {
+    // A single retry hides a transient 502/blip without turning every action
+    // into a retry loop. Only unreachable-orchestrator failures qualify: a
+    // caller error retried unchanged fails identically.
+    if (options?.retryUnavailableOnce && shouldRetryOrchestratorError(err)) {
+      logger.warn({ path }, "Orchestrator unreachable, retrying once");
+      return doCall<T>(path, payload, timeoutMs);
+    }
+    throw err;
+  }
+}
+
+/**
+ * True when the failure is worth one automatic retry: the orchestrator never
+ * answered, so an identical request may succeed. Refusals (quota, validation,
+ * not-found) are excluded because retrying them is pointless.
+ */
+export function shouldRetryOrchestratorError(err: unknown): boolean {
+  return err instanceof OrchestratorError && err.code === "ORCHESTRATOR_UNREACHABLE";
+}
+
+async function doCall<T>(path: string, payload: unknown, timeoutMs: number): Promise<T> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 

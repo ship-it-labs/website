@@ -154,6 +154,37 @@ export function whopPlanIdFor(planId: string): string | null {
   return legacyName ? checkPlanId(planId, legacyName) : null;
 }
 
+/**
+ * The environment-specific variable a tier is bought from, for error messages.
+ * Read per call like the resolution itself, so it tracks the live NODE_ENV.
+ * Null for unknown tiers, which fail as PLAN_NOT_FOUND before this matters.
+ */
+export function expectedWhopPlanEnvName(planId: string): string | null {
+  const name = PLAN_ENV_NAME[planId];
+  if (!name) return null;
+  return `${process.env.NODE_ENV === "production" ? "PROD" : "SANDBOX"}_${name}_PLAN_ID`;
+}
+
+/**
+ * True when the stored row already entitles this tier: buying again would open
+ * a second paid membership for the same plan, which is how double subscriptions
+ * happen. The checkout route refuses those with ALREADY_SUBSCRIBED instead of
+ * handing Whop a duplicate purchase. A scheduled cancellation does not block:
+ * the customer is leaving, and re-buying before the period ends is legitimate.
+ */
+export function isSameTierActiveSubscription(
+  subscription: { plan_id?: string; status?: string; cancel_at_period_end?: boolean | number | null } | null,
+  planId: string
+): boolean {
+  if (!subscription || subscription.plan_id !== planId) return false;
+  if (subscription.cancel_at_period_end) return false;
+  return (
+    subscription.status === "active" ||
+    subscription.status === "past_due" ||
+    subscription.status === "trialing"
+  );
+}
+
 /** Reports which tiers are missing a Whop plan, so misconfiguration is visible. */
 export function unconfiguredPlans(): string[] {
   return Object.keys(PLAN_ENV_NAME).filter((planId) => !whopPlanIdFor(planId));
@@ -172,6 +203,8 @@ export async function createCheckout(options: {
   whopPlanId: string;
   userId: string;
   planId: string;
+  /** Where the checkout was started, for reconciling "why was I charged". */
+  source?: string;
 }): Promise<CheckoutResult> {
   const c = whopClient();
 
@@ -180,11 +213,29 @@ export async function createCheckout(options: {
     metadata: {
       user_id: options.userId,
       plan_id: options.planId,
+      ...(options.source ? { source: options.source } : {}),
     },
   });
 
   if (!checkout.purchase_url) {
     throw new Error("Whop did not return a purchase_url for the checkout");
+  }
+
+  // Record the checkout creation for idempotency (prevents double-click
+  // double-billing). The webhook will complete or fail the purchase.
+  try {
+    await supabase.from("webhook_events").insert({
+      provider: "whop",
+      event_type: "checkout.created",
+      idempotency_key: `checkout_${checkout.id ?? crypto.randomUUID()}`,
+      payload: {
+        data: { purchase_url: checkout.purchase_url },
+        metadata: { user_id: options.userId, plan_id: options.planId },
+      },
+      processed: false,
+    });
+  } catch (err) {
+    logger.warn({ err }, "Failed to record checkout.created event");
   }
 
   return { purchaseUrl: checkout.purchase_url, planId: checkout.plan?.id ?? options.whopPlanId };
@@ -208,6 +259,10 @@ export interface WhopMembership {
   // Whop-hosted page where the customer manages the membership themselves,
   // including cancellation and plan changes. Null when no member record exists.
   manage_url?: string | null;
+  // Discount code applied to the membership, when Whop includes one. Surfaced
+  // on the billing page so a promo buyer sees their discount acknowledged;
+  // null when the purchase was full price.
+  promo_code?: string | null;
 }
 
 /**
@@ -230,6 +285,15 @@ export function classifyWebhookObject(id: unknown): WebhookObjectKind {
  */
 export function whopPlanIdOf(membership: WhopMembership): string | null {
   return membership.plan_id ?? membership.plan?.id ?? null;
+}
+
+/**
+ * The discount code on a membership, if Whop carried one. String-only: a
+ * non-string value is a misshapen payload, not a code.
+ */
+export function promoCodeOf(membership: WhopMembership): string | null {
+  const code = membership.promo_code;
+  return typeof code === "string" && code.length > 0 ? code : null;
 }
 
 export async function retrieveMembership(membershipId: string): Promise<WhopMembership> {
@@ -258,13 +322,29 @@ export async function listMembershipsForUser(
  * API rejects cancel_at_period_end on cancel with parameter_invalid (the SDK
  * type still declares it), while PATCH update documents true as "schedule for
  * period end" and false as "reverse a pending one".
+ *
+ * If the membership is already canceled or has cancel_at_period_end=true,
+ * Whop returns parameter_invalid. We treat that as success (idempotent)
+ * because the desired end state is already in place.
  */
 export async function cancelMembership(membershipId: string): Promise<void> {
   const c = whopClient();
-  await c.memberships.update({
-    id: membershipId,
-    cancel_at_period_end: true,
-  });
+  try {
+    await c.memberships.update({
+      id: membershipId,
+      cancel_at_period_end: true,
+    });
+  } catch (err) {
+    // Whop returns parameter_invalid when cancel_at_period_end is already true
+    // or the membership is already canceled. Treat as success — the end state
+    // we want is already set.
+    const message = err instanceof Error ? err.message : String(err);
+    if (message.includes("parameter_invalid")) {
+      logger.info({ membershipId }, "Membership already scheduled for cancellation or canceled");
+      return;
+    }
+    throw err;
+  }
 }
 
 // Whop follows the Standard Webhooks spec.
@@ -312,7 +392,7 @@ export function verifyWebhookSignature(params: {
     return false;
   }
 
-  const key = Buffer.from(secret, "utf8");
+  const key = Buffer.from(secret, "base64");
   const expected = crypto
     .createHmac("sha256", key)
     .update(`${params.webhookId}.${params.timestamp}.${params.body}`)
@@ -395,7 +475,19 @@ export async function handleWebhookEvent(
 ): Promise<WebhookOutcome> {
   const desiredStatus = PLAN_FOR_STATUS[event.type];
   if (!desiredStatus) {
-    return { handled: false, duplicate: false };
+    // Unknown today, and possibly a new Whop shape tomorrow. Recorded and
+    // acknowledged rather than failed: nothing was applied, so no retry will
+    // ever resolve it, and a 500 would retry forever. The warn keeps new
+    // types visible so handling can be added deliberately.
+    logger.warn({ eventId: event.id, type: event.type }, "Ignoring unknown Whop webhook type");
+    await supabase.from("webhook_events").insert({
+      provider: "whop",
+      event_type: event.type,
+      idempotency_key: event.id,
+      payload: event as unknown as Record<string, unknown>,
+      processed: true,
+    });
+    return { handled: true, duplicate: false };
   }
 
   // The unique constraint on idempotency_key makes duplicate delivery a no-op
@@ -526,14 +618,56 @@ export async function handleWebhookEvent(
       const oldId = (existing as { whop_membership_id?: string; status?: string } | null)?.whop_membership_id;
       const oldStatus = (existing as { whop_membership_id?: string; status?: string } | null)?.status;
       if (oldId && oldId !== membership.id && (oldStatus === "active" || oldStatus === "past_due")) {
-        await cancelMembership(oldId);
-        logger.info(
-          { userId, oldMembershipId: oldId, newMembershipId: membership.id },
-          "Canceled superseded membership after tier change"
-        );
+        // Retry with backoff: if Whop is transiently down, schedule a reconciliation
+        // rather than silently leaving the old membership billing forever.
+        let cancelled = false;
+        for (let attempt = 0; attempt < 3; attempt++) {
+          try {
+            await cancelMembership(oldId);
+            cancelled = true;
+            break;
+          } catch (err) {
+            if (attempt === 2) throw err;
+            await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+          }
+        }
+        if (cancelled) {
+          logger.info(
+            { userId, oldMembershipId: oldId, newMembershipId: membership.id },
+            "Canceled superseded membership after tier change"
+          );
+        }
       }
     } catch (err) {
-      logger.error({ err, userId }, "Failed to cancel superseded membership");
+      // Final failure: log prominently and record for manual reconciliation.
+      // The subscription write must not depend on this — the new membership
+      // is already stored; the old one will be caught by a future webhook or
+      // admin review. We do NOT return handled:false here because the primary
+      // subscription change succeeded.
+      logger.error(
+        { err, userId, eventId: event.id },
+        "Failed to cancel superseded membership after retries — requires manual reconciliation"
+      );
+    }
+  }
+
+  // A discount code arrives sporadically — some events carry it, most do not —
+  // so an event without one keeps the last seen value rather than wiping it.
+  // A missing row or a lookup failure reads as no carried code, never a fatal
+  // one: the promo is display-only, and the subscription write must not depend
+  // on it.
+  let promoCode = promoCodeOf(membership);
+  if (!promoCode) {
+    try {
+      const { data: priorSub } = await supabase
+        .from("subscriptions")
+        .select("promo_code")
+        .eq("user_id", userId)
+        .single();
+      const carried = (priorSub as { promo_code?: string | null } | null)?.promo_code;
+      promoCode = typeof carried === "string" && carried.length > 0 ? carried : null;
+    } catch {
+      promoCode = null;
     }
   }
 
@@ -549,6 +683,7 @@ export async function handleWebhookEvent(
       plan_id: planId ?? "free",
       whop_membership_id: membership.id,
       whop_plan_id: whopPlanIdOf(membership),
+      promo_code: promoCode,
       status,
       current_period_end: membership.current_period_end ?? null,
       cancel_at_period_end: membership.cancel_at_period_end ?? false,

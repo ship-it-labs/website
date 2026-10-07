@@ -6,6 +6,7 @@ import { Reveal } from "@/components/site/Reveal";
 import { HeroTexture } from "@/components/site/HeroTexture";
 import { PromoPill } from "@/components/site/PromoBanner";
 import { WrenchIcon, PlayIcon, ShieldIcon } from "@/components/site/FeatureIcon";
+import { usePageTitle } from "@/lib/page-title";
 import { useAuth } from "@/lib/auth-context";
 
 const FEATURES = [
@@ -36,6 +37,7 @@ const STEPS = [
 ];
 
 export function HomePage() {
+  usePageTitle("Ship the idea. Let the agent run it");
   // Signed-in visitors get a way back to the product, not a second signup
   // pitch. The nav already adapts elsewhere; the hero is where it matters.
   const { user, loading } = useAuth();

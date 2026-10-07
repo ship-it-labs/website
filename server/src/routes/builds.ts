@@ -6,6 +6,13 @@ import {
   triggerGitHubActionsBuild,
   getBuild,
   listBuilds,
+  setBuildExecutor,
+  setBuildProvenance,
+  removeBuild,
+  filterBuildsByStatus,
+  findInflightDuplicate,
+  getBuildStorageUsage,
+  logWasTruncated,
   GitHubDispatchError,
 } from "../services/build-service.js";
 import { resolveBuildExecutorWithSettings } from "../services/build-executor.js";
@@ -35,6 +42,19 @@ const buildSchema = z
     { message: "Provide at least one install, build or test command" }
   );
 
+/**
+ * Unknown build ids share one 404 shape with unknown runtime ids, so callers
+ * branch on a single NOT_FOUND code.
+ */
+function buildNotFound(message = "Build not found"): { error: { code: string; message: string } } {
+  return { error: { code: "NOT_FOUND", message } };
+}
+
+/** Records the executor without failing the request on older databases. */
+async function recordExecutor(buildId: string, executor: string): Promise<void> {
+  await setBuildExecutor(buildId, executor);
+}
+
 export { isCommandAllowed } from "../services/command-guard.js";
 
 export async function buildRoutes(app: FastifyInstance): Promise<void> {
@@ -60,7 +80,7 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
 
     const { data: project } = await supabase
       .from("projects")
-      .select("id")
+      .select("id, upload_sha256, repo_url")
       .eq("id", project_id)
       .eq("user_id", req.auth!.userId)
       .single();
@@ -80,6 +100,15 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
 
     try {
       const executor = await resolveBuildExecutorWithSettings();
+      await recordExecutor(build.id, executor);
+      // Provenance is a snapshot of what the build ran against, taken before
+      // dispatch: the archive hash identifies the exact source even if the
+      // project is re-uploaded while the build is queued.
+      const proj = project as { upload_sha256?: unknown; repo_url?: unknown };
+      await setBuildProvenance(build.id, {
+        sourceSha256: typeof proj.upload_sha256 === "string" ? proj.upload_sha256 : null,
+        sourceRepo: typeof proj.repo_url === "string" ? proj.repo_url : null,
+      });
 
       // GitHub only works when a hosted runner can reach this deployment. Locally
       // it cannot, so the build runs in the platform's own runtime instead of
@@ -127,10 +156,113 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
     const build = await getBuild(id);
 
     if (!build || build.user_id !== req.auth!.userId) {
-      return reply.status(404).send({ error: { code: "BUILD_NOT_FOUND", message: "Build not found" } });
+      return reply.status(404).send(buildNotFound());
     }
 
     return reply.send({ build });
+  });
+
+  // Re-runs a build with its original commands. Idempotent while the same work
+  // is already in flight: a retried or double-clicked request returns the
+  // running build instead of queueing a duplicate. Otherwise creates a new
+  // build row (the old one keeps its logs) and dispatches it through the
+  // current executor.
+  app.post("/builds/:id/rebuild", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const previous = await getBuild(id);
+
+    if (!previous || previous.user_id !== req.auth!.userId) {
+      return reply.status(404).send(buildNotFound());
+    }
+
+    const toCommands = (value: unknown): string[] =>
+      Array.isArray(value)
+        ? value.filter((item): item is string => typeof item === "string")
+        : [];
+
+    const fingerprint = {
+      project_id: previous.project_id,
+      install_commands: toCommands(previous.install_commands),
+      build_commands: toCommands(previous.build_commands),
+      test_commands: toCommands(previous.test_commands),
+    };
+
+    const inflight = findInflightDuplicate(
+      await listBuilds(req.auth!.userId, 50),
+      fingerprint
+    );
+    if (inflight) {
+      return reply.send({ build_id: inflight.id, status: inflight.status, deduped: true });
+    }
+
+    const build = await createBuild(
+      req.auth!.userId,
+      previous.project_id,
+      toCommands(previous.install_commands),
+      toCommands(previous.build_commands),
+      toCommands(previous.test_commands),
+      req.auth!.plan.build_timeout_seconds
+    );
+
+    try {
+      const executor = await resolveBuildExecutorWithSettings();
+      await recordExecutor(build.id, executor);
+
+      // The source may have been re-uploaded since the original build, so
+      // provenance comes from the project's current archive, not the old row.
+      const { data: source } = await supabase
+        .from("projects")
+        .select("upload_sha256, repo_url")
+        .eq("id", previous.project_id)
+        .eq("user_id", req.auth!.userId)
+        .single();
+      const src = (source ?? {}) as { upload_sha256?: unknown; repo_url?: unknown };
+      await setBuildProvenance(build.id, {
+        sourceSha256: typeof src.upload_sha256 === "string" ? src.upload_sha256 : null,
+        sourceRepo: typeof src.repo_url === "string" ? src.repo_url : null,
+      });
+
+      if (executor === "github") {
+        await triggerGitHubActionsBuild(build.id);
+      } else {
+        await triggerRuntimeBuild(build.id);
+      }
+
+      await recordBuild(req.auth!.userId);
+    } catch (err) {
+      logger.error({ err, buildId: build.id }, "Failed to trigger rebuild");
+      const reason = err instanceof Error ? err.message : String(err);
+      const transient = err instanceof GitHubDispatchError && err.transient;
+      return reply.status(transient ? 429 : 502).send({
+        error: {
+          code: transient ? "BUILD_CAPACITY" : "BUILD_DISPATCH_FAILED",
+          message: `Could not start the build pipeline: ${reason}`,
+        },
+      });
+    }
+
+    return reply.status(202).send({ build_id: build.id, status: build.status });
+  });
+
+  // Deletes the build plus its logs and artifact rows. Storage blobs behind
+  // artifact URLs expire via bucket lifecycle instead of blocking the delete.
+  app.delete("/builds/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const build = await getBuild(id);
+
+    if (!build || build.user_id !== req.auth!.userId) {
+      return reply.status(404).send(buildNotFound());
+    }
+
+    try {
+      await removeBuild(id);
+    } catch {
+      return reply.status(500).send({
+        error: { code: "BUILD_DELETE_FAILED", message: "Could not delete the build" },
+      });
+    }
+
+    return reply.send({ deleted: true });
   });
 
   app.get("/builds/:id/logs", async (req, reply) => {
@@ -138,7 +270,7 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
     const build = await getBuild(id);
 
     if (!build || build.user_id !== req.auth!.userId) {
-      return reply.status(404).send({ error: { code: "BUILD_NOT_FOUND", message: "Build not found" } });
+      return reply.status(404).send(buildNotFound());
     }
 
     const { data: logs } = await supabase
@@ -155,7 +287,7 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
     const build = await getBuild(id);
 
     if (!build || build.user_id !== req.auth!.userId) {
-      return reply.status(404).send({ error: { code: "BUILD_NOT_FOUND", message: "Build not found" } });
+      return reply.status(404).send(buildNotFound());
     }
 
     const { data: artifacts } = await supabase
@@ -168,9 +300,11 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
 
   app.get("/builds", async (req, reply) => {
     const builds = await listBuilds(req.auth!.userId);
+    const query = req.query as { status?: string };
+    const filtered = filterBuildsByStatus(builds, query.status ?? "all");
     // The browser cannot build the run link itself: it has no idea which
     // repository the workflow runs in.
-    return reply.send({ builds: builds.map(withRunUrl) });
+    return reply.send({ builds: filtered.map(withRunUrl) });
   });
 }
 

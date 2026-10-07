@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyRequest } from "fastify";
 import { WebSocket } from "ws";
 import { supabase } from "../db/index.js";
 import { hashApiKey } from "../utils/api-key.js";
+import { hasSessionRow } from "../services/sessions.js";
 import { logger } from "../utils/logger.js";
 
 interface Client {
@@ -24,17 +25,68 @@ export function broadcastToUser(userId: string, type: string, payload: unknown):
   }
 }
 
+function isApiKey(token: string): boolean {
+  return token.startsWith("ox_live_") || token.startsWith("ox_test_");
+}
+
+/**
+ * Mirrors middleware/auth.ts so the socket accepts exactly what HTTP accepts:
+ * a live API key, or a session token from login. Session tokens resolve the
+ * same way — the local driver's opaque token first, then the Supabase Auth
+ * API — and must still be on record, so signing out everywhere closes the
+ * socket's credential too. Disabled accounts are refused here as well: without
+ * that check a ban would stop API calls but leave a connected socket humming.
+ */
 async function authenticateSocket(token: string | undefined): Promise<string | null> {
   if (!token) return null;
 
-  const { data } = await supabase
-    .from("api_keys")
-    .select("user_id, is_active")
-    .eq("key_hash", hashApiKey(token))
+  let userId: string | null = null;
+
+  if (isApiKey(token)) {
+    const { data } = await supabase
+      .from("api_keys")
+      .select("user_id, is_active, expires_at")
+      .eq("key_hash", hashApiKey(token))
+      .single();
+
+    if (!data?.is_active) return null;
+    if (data.expires_at && new Date(data.expires_at as string).getTime() <= Date.now()) {
+      return null;
+    }
+    userId = data.user_id as string;
+  } else {
+    const local = supabase as { getUserIdForToken?: (token: string) => string | null };
+    const localUserId = local.getUserIdForToken?.(token) ?? null;
+    if (localUserId) {
+      userId = localUserId;
+    } else {
+      const auth = supabase.auth as unknown as {
+        getUser?: (token: string) => Promise<{ data: { user: { id: string } | null } }>;
+      };
+      if (typeof auth.getUser !== "function") return null;
+      try {
+        const { data } = await auth.getUser(token);
+        userId = data?.user?.id ?? null;
+      } catch {
+        return null;
+      }
+    }
+
+    if (!userId) return null;
+    if (!(await hasSessionRow(userId, token))) return null;
+  }
+
+  if (!userId) return null;
+
+  const { data: user } = await supabase
+    .from("users")
+    .select("id, is_active")
+    .eq("id", userId)
     .single();
 
-  if (!data || !data.is_active) return null;
-  return data.user_id;
+  if (!user) return null;
+  if (user.is_active === false || user.is_active === 0) return null;
+  return user.id as string;
 }
 
 export async function websocketRoutes(app: FastifyInstance): Promise<void> {

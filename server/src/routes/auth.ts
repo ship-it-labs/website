@@ -1,9 +1,11 @@
-import { FastifyInstance } from "fastify";
+import { FastifyInstance, FastifyReply } from "fastify";
 import { supabase, usingSqlite } from "../db/index.js";
 import { generateApiKey } from "../utils/api-key.js";
+import { isCommonPassword } from "../utils/passwords.js";
 import { seedPlans } from "../services/plan-service.js";
 import { BOOTSTRAP_ADMIN_EMAIL } from "../services/admin.js";
 import { recordSession, hashSessionToken } from "../services/sessions.js";
+import { checkRateLimit } from "../services/rate-limit.js";
 import { supabaseAdmin } from "./account.js";
 import { getSetting } from "./admin.js";
 import { logger } from "../utils/logger.js";
@@ -52,11 +54,39 @@ async function shouldStartAsAdmin(email: string): Promise<boolean> {
   }
 }
 
-export async function authRoutes(app: FastifyInstance): Promise<void> {
-  app.post("/auth/signup", async (req, reply) => {
+/**
+ * One-minute sliding-window brake. True when the caller is over the limit, in
+ * which case the 429 is already sent and the handler returns. Limits live
+ * next to each route so a reader sees the budget where it is spent.
+ */
+function limited(reply: FastifyReply, key: string, limit: number): boolean {
+  const result = checkRateLimit(key, limit, 60_000);
+  if (result.allowed) return false;
+  reply.status(429).send({
+    error: {
+      code: "RATE_LIMITED",
+      message: "Too many attempts. Wait a moment and try again.",
+      retry_after_seconds: result.retryAfterSeconds,
+    },
+  });
+  return true;
+}
+
+export async function authRoutes(app: FastifyInstance): Promise<void> {  app.post("/auth/signup", async (req, reply) => {
+    // Cheap abuse brake before any work: fake accounts are free to mint and
+    // expensive to host. Per IP, not per email — per-email limits let anyone
+    // lock anyone else out of signing up.
+    if (limited(reply, `auth:signup:${req.ip}`, 10)) return;
+
     const { email, password } = req.body as { email: string; password: string };
 
-    if (!email || !password) {
+    // Accounts are keyed by lowercase email everywhere downstream (the clash
+    // check, the row, the response), so normalize once up front. Without this
+    // "User@x.com" and "user@x.com" both passed the clash check and the second
+    // insert died on the unique constraint with a 500.
+    const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+
+    if (!normalizedEmail || !password) {
       return reply.status(400).send({
         error: { code: "BAD_REQUEST", message: "email and password are required" },
       });
@@ -68,10 +98,16 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    if (isCommonPassword(password)) {
+      return reply.status(400).send({
+        error: { code: "WEAK_PASSWORD", message: "That password is too common. Choose something less guessable." },
+      });
+    }
+
     const { data: existing } = await supabase
       .from("users")
       .select("id")
-      .eq("email", email)
+      .eq("email", normalizedEmail)
       .single();
 
     if (existing) {
@@ -92,7 +128,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     // The driver owns credential storage: Supabase Auth in production, the
     // local scrypt store in development. Either returns the new account.
-    const credentials = await localSignUp(email, password);
+    const credentials = await localSignUp(normalizedEmail, password);
 
     if (credentials.error) {
       return reply.status(400).send({
@@ -111,30 +147,38 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     const { error: userError } = await supabase.from("users").insert({
       id: userId,
-      email,
+      email: normalizedEmail,
       plan_id: "free",
       // The first account owns the platform, and the bootstrap address owns it
       // no matter when it arrives. Either fact alone is enough; the request-time
       // check in isAdminUser covers databases created before this column existed.
-      is_admin: (await shouldStartAsAdmin(email)) ? true : false,
+      is_admin: (await shouldStartAsAdmin(normalizedEmail)) ? true : false,
     });
 
     if (userError) {
-      logger.error({ err: userError, email }, "Failed to create user row");
+      logger.error({ err: userError, email: normalizedEmail }, "Failed to create user row");
       return reply.status(500).send({
         error: { code: "INTERNAL_ERROR", message: "Could not create the account" },
       });
     }
 
     const { key, hash, prefix } = generateApiKey();
-    await supabase.from("api_keys").insert({
-      id: `key_${userId.slice(0, 8)}`,
+    const keyId = `key_${userId.slice(0, 8)}_${Date.now().toString(36)}`;
+    const { error: keyError } = await supabase.from("api_keys").insert({
+      id: keyId,
       user_id: userId,
       key_hash: hash,
       key_prefix: prefix,
       name: "default",
       is_active: true,
     });
+
+    if (keyError) {
+      logger.error({ err: keyError, userId }, "Failed to create initial API key");
+      return reply.status(500).send({
+        error: { code: "INTERNAL_ERROR", message: "Could not create the account" },
+      });
+    }
 
     // Remembered for the settings device list and revocation. Best-effort:
     // a recording failure must never fail the signup it belongs to.
@@ -149,22 +193,27 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return reply.status(201).send({
-      user: { id: userId, email },
+      user: { id: userId, email: normalizedEmail },
       api_key: key,
       session: session?.access_token ? { access_token: session.access_token } : null,
     });
   });
 
   app.post("/auth/login", async (req, reply) => {
-    const { email, password } = req.body as { email: string; password: string };
+    // 30 attempts per minute per IP: enough for a human retrying a password,
+    // slow enough to make credential stuffing uneconomical.
+    if (limited(reply, `auth:login:${req.ip}`, 30)) return;
 
-    if (!email || !password) {
+    const { email, password } = req.body as { email: string; password: string };
+    const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+
+    if (!normalizedEmail || !password) {
       return reply.status(400).send({
         error: { code: "BAD_REQUEST", message: "email and password are required" },
       });
     }
 
-    const credentials = await localSignIn(email, password);
+    const credentials = await localSignIn(normalizedEmail, password);
 
     if (credentials.error || !credentials.data.user) {
       return reply.status(401).send({
@@ -176,9 +225,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     const { data: user } = await supabase
       .from("users")
-      .select("id, email, plan_id")
+      .select("id, email, plan_id, is_active")
       .eq("id", credentials.data.user.id)
       .single();
+
+    if (user?.is_active === false || user?.is_active === 0) {
+      return reply.status(403).send({
+        error: { code: "ACCOUNT_DISABLED", message: "This account has been disabled. Contact support." },
+      });
+    }
 
     if (session?.access_token) {
       const agent = req.headers["user-agent"];
@@ -191,7 +246,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return reply.send({
-      user: user ?? { id: credentials.data.user.id, email },
+      user: user ?? { id: credentials.data.user.id, email: normalizedEmail },
       session: session?.access_token ? { access_token: session.access_token } : null,
     });
   });
@@ -223,9 +278,12 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.post("/auth/reset-password", async (req, reply) => {
-    const { email } = req.body as { email: string };
+    if (limited(reply, `auth:reset:${req.ip}`, 10)) return;
 
-    if (!email) {
+    const { email } = req.body as { email: string };
+    const normalizedEmail = typeof email === "string" ? email.trim().toLowerCase() : "";
+
+    if (!normalizedEmail) {
       return reply.status(400).send({
         error: { code: "BAD_REQUEST", message: "email is required" },
       });
@@ -233,10 +291,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
 
     // Always reports success so the endpoint cannot be used to discover which
     // addresses are registered.
-    if (!usingSqlite) {
-      const { error } = await supabase.auth.resetPasswordForEmail(email);
+    if (!usingSqlite && normalizedEmail) {
+      const { error } = await supabase.auth.resetPasswordForEmail(normalizedEmail);
       if (error) {
-        logger.warn({ error, email }, "Password reset request failed");
+        logger.warn({ error, email: normalizedEmail }, "Password reset request failed");
       }
     }
 
@@ -249,6 +307,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
   // Local development has no email delivery, so the link never exists there
   // and this endpoint has nothing to complete.
   app.post("/auth/reset-confirm", async (req, reply) => {
+    if (limited(reply, `auth:reset-confirm:${req.ip}`, 20)) return;
+
     const { recovery_token, new_password } = req.body as {
       recovery_token?: string;
       new_password?: string;
@@ -259,6 +319,15 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {
         error: {
           code: "VALIDATION_ERROR",
           message: "A valid recovery link and an 8+ character password are required",
+        },
+      });
+    }
+
+    if (isCommonPassword(new_password)) {
+      return reply.status(400).send({
+        error: {
+          code: "WEAK_PASSWORD",
+          message: "That password is too common. Choose something less guessable.",
         },
       });
     }

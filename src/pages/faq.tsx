@@ -1,6 +1,8 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { ProsePage } from "@/components/site/ProsePage";
+import { ShowMore } from "@/components/site/ShowMore";
+import { usePageTitle } from "@/lib/page-title";
 import { cn } from "@/lib/utils";
 
 const ITEMS: { question: string; answer: string[] }[] = [
@@ -55,7 +57,10 @@ const ITEMS: { question: string; answer: string[] }[] = [
 ];
 
 export function FaqPage() {
-  const [open, setOpen] = useState<number | null>(0);
+  usePageTitle("FAQ");
+  // Keyed by question, not index: the ShowMore slice below reorders visible
+  // positions when collapsed, and an index would point at the wrong answer.
+  const [open, setOpen] = useState<string | null>(ITEMS[0].question);
 
   return (
     <ProsePage
@@ -63,43 +68,48 @@ export function FaqPage() {
       subtitle="Quotas, sessions, builds, billing. Still stuck?"
     >
       <div className="divide-y divide-white/[0.06] rounded-2xl border border-white/[0.07] bg-white/[0.02]">
-        {ITEMS.map((item, index) => {
-          const expanded = open === index;
-          return (
-            <div key={item.question}>
-              <button
-                type="button"
-                onClick={() => setOpen(expanded ? null : index)}
-                aria-expanded={expanded}
-                className="flex w-full items-center justify-between gap-4 px-6 py-5 text-left"
-              >
-                <span className="text-[15px] font-medium text-white">
-                  {item.question}
-                </span>
-                <svg
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  aria-hidden="true"
-                  className={cn(
-                    "h-4 w-4 shrink-0 text-zinc-500 transition-transform duration-200",
-                    expanded && "rotate-180"
-                  )}
+        <ShowMore
+          items={ITEMS}
+          initial={5}
+          expandLabel={(hidden) => `Show all questions (${hidden} more)`}
+          renderItem={(item) => {
+            const expanded = open === item.question;
+            return (
+              <div key={item.question}>
+                <button
+                  type="button"
+                  onClick={() => setOpen(expanded ? null : item.question)}
+                  aria-expanded={expanded}
+                  className="flex w-full items-center justify-between gap-4 px-6 py-5 text-left"
                 >
-                  <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-              {expanded && (
-                <div className="space-y-3 px-6 pb-6 text-[15px] leading-relaxed text-zinc-400">
-                  {item.answer.map((paragraph) => (
-                    <p key={paragraph.slice(0, 24)}>{paragraph}</p>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
+                  <span className="text-[15px] font-medium text-white">
+                    {item.question}
+                  </span>
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    aria-hidden="true"
+                    className={cn(
+                      "h-4 w-4 shrink-0 text-zinc-500 transition-transform duration-200",
+                      expanded && "rotate-180"
+                    )}
+                  >
+                    <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+                {expanded && (
+                  <div className="space-y-3 px-6 pb-6 text-[15px] leading-relaxed text-zinc-400">
+                    {item.answer.map((paragraph) => (
+                      <p key={paragraph.slice(0, 24)}>{paragraph}</p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          }}
+        />
       </div>
       <p className="mt-8 text-sm text-zinc-500">
         Not answered here? <Link to="/contact" className="text-violet-300 transition-colors hover:text-violet-200">Contact support</Link> — include your account email and, for billing, the Whop receipt.

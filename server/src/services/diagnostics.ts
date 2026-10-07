@@ -1,4 +1,4 @@
-import { usingSqlite } from "../db/index.js";
+import { supabase, usingSqlite, type Database } from "../db/index.js";
 import { resolveBuildExecutor } from "./build-executor.js";
 import { publicBaseUrl, siteUrl, orchestratorUrl } from "../config/urls.js";
 import { callOrchestrator } from "./orchestrator-client.js";
@@ -85,4 +85,79 @@ export async function collectDiagnostics(): Promise<Diagnostics> {
     },
     orchestrator_reachable: orchestratorReachable,
   };
+}
+
+/**
+ * Tables the row-count diagnostic may probe. Mirrors the admin console's
+ * browsable list; auth tables and secrets stay out for the same reason.
+ */
+export const COUNTABLE_TABLES = [
+  "users",
+  "plans",
+  "subscriptions",
+  "api_keys",
+  "projects",
+  "builds",
+  "build_logs",
+  "runtimes",
+  "runtime_sessions",
+  "usage_months",
+  "webhook_events",
+  "user_sessions",
+  "user_preferences",
+  "platform_settings",
+  "env_overrides",
+  "admin_audit",
+] as const;
+
+// One column guaranteed to exist per table. Not every table has an id
+// (usage_months and subscriptions are keyed by user_id), so a blanket
+// select("id") would fail on exactly the tables being measured.
+const COUNT_COLUMNS: Record<string, string> = {
+  users: "id",
+  plans: "id",
+  subscriptions: "user_id",
+  api_keys: "id",
+  projects: "id",
+  builds: "id",
+  build_logs: "build_id",
+  runtimes: "id",
+  runtime_sessions: "id",
+  usage_months: "user_id",
+  webhook_events: "id",
+  user_sessions: "id",
+  user_preferences: "user_id",
+  platform_settings: "key",
+  env_overrides: "key",
+  admin_audit: "id",
+};
+
+export interface TableCount {
+  table: string;
+  rows: number | null;
+}
+
+/**
+ * Per-table row counts for the database diagnostic. Each table is probed
+ * independently and a failure yields null for that table rather than failing
+ * the whole report — a not-yet-migrated table (e.g. admin_audit) shows as
+ * unknown instead of breaking the page.
+ */
+export async function collectTableCounts(db: Database = supabase): Promise<TableCount[]> {
+  const counts: TableCount[] = [];
+  for (const table of COUNTABLE_TABLES) {
+    try {
+      const { data, error } = await db.from(table).select(COUNT_COLUMNS[table]);
+      // No aggregate support in the local SQLite stand-in, and these tables
+      // are small, so rows are counted in code with a single narrow column.
+      if (error) {
+        counts.push({ table, rows: null });
+        continue;
+      }
+      counts.push({ table, rows: (data ?? []).length });
+    } catch {
+      counts.push({ table, rows: null });
+    }
+  }
+  return counts;
 }

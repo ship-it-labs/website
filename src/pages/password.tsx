@@ -1,11 +1,13 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
+import { usePageTitle } from "@/lib/page-title";
 import { SiteNav } from "@/components/site/SiteNav";
 import { SiteFooter } from "@/components/site/SiteFooter";
 import { AuroraBackground } from "@/components/site/AuroraBackground";
 
 export function ForgotPasswordPage() {
+  usePageTitle("Reset password");
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
@@ -100,6 +102,7 @@ export function ForgotPasswordPage() {
 }
 
 export function ResetPasswordPage() {
+  usePageTitle("Choose a new password");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);

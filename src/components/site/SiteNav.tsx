@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { OfflineBanner } from "@/components/site/OfflineBanner";
 import { cn } from "@/lib/utils";
 
 const LINKS = [
@@ -35,6 +36,7 @@ export function SiteNav() {
   }, [open]);
 
   return (
+    <>
     <header className="fixed inset-x-0 top-0 z-50 px-4 pt-4 sm:px-6">
       <nav
         className={cn(
@@ -159,5 +161,7 @@ export function SiteNav() {
         </div>
       </div>
     </header>
+    <OfflineBanner />
+    </>
   );
 }

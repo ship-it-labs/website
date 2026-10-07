@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "@/lib/api";
+import { formatNumber } from "@/lib/format";
+import { usePageTitle } from "@/lib/page-title";
 import { PromoBanner } from "@/components/site/PromoBanner";
 import { cn } from "@/lib/utils";
 import { SiteNav } from "@/components/site/SiteNav";
@@ -61,6 +63,7 @@ const FALLBACK: Plan[] = [
 ];
 
 export function PricingPage() {
+  usePageTitle("Pricing");
   const [plans, setPlans] = useState<Plan[]>(FALLBACK);
   const [monthly, setMonthly] = useState(true);
 
@@ -192,7 +195,7 @@ export function PricingPage() {
 
                     <ul className="mt-8 space-y-3.5 text-sm">
                       <Row
-                        label={`${plan.runtime_hours_per_month} runtime hours`}
+                        label={`${formatNumber(plan.runtime_hours_per_month)} runtime hours`}
                         hint="per month"
                       />
                       <Row label={`Up to ${plan.max_runtime_hours}h per session`} />
