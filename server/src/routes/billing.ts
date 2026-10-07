@@ -222,7 +222,14 @@ export async function webhookRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const event = JSON.parse(raw) as WhopWebhookEvent;
+    let event: WhopWebhookEvent;
+    try {
+      event = JSON.parse(raw) as WhopWebhookEvent;
+    } catch {
+      return reply.status(400).send({
+        error: { code: "INVALID_JSON", message: "Webhook payload is not valid JSON" },
+      });
+    }
 
     if (!event.type || !event.id) {
       return reply.status(400).send({

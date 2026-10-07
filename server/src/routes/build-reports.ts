@@ -61,6 +61,11 @@ function secretFromHeader(req: FastifyRequest): string {
  * Caps the log by bytes as well as lines. A single very long line, or a few
  * hundred long ones, would otherwise make the insert fail on payload size and
  * lose the status update along with the output.
+ *
+ * Keeps the tail rather than the head: build errors live at the end of the
+ * log, so dropping the earliest lines is what lets a large failed log still
+ * show its diagnosis. The viewer renders lines in order, so the oldest
+ * lines become the truncation notice.
  */
 export function capLogs(
   logs: Array<{ stream: "stdout" | "stderr" | "system"; content: string }>
@@ -69,20 +74,22 @@ export function capLogs(
   let bytes = 0;
   let truncated = false;
 
-  for (const line of logs) {
+  // Walk backwards so we keep the tail and drop the head when trimming.
+  for (let i = logs.length - 1; i >= 0; i--) {
+    const line = logs[i];
     const size = Buffer.byteLength(line.content, "utf8") + 32;
     if (bytes + size > MAX_LOG_BYTES) {
       truncated = true;
       break;
     }
-    kept.push(line);
+    kept.unshift(line);
     bytes += size;
   }
 
   if (truncated) {
-    kept.push({
+    kept.unshift({
       stream: "system",
-      content: `[log truncated at ${MAX_LOG_BYTES} bytes]`,
+      content: `[log truncated — earliest lines dropped, showing tail at ${MAX_LOG_BYTES} bytes]`,
     });
   }
 
