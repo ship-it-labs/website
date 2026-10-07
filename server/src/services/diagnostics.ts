@@ -40,6 +40,16 @@ function present(name: string): boolean {
   return (process.env[name] ?? "").trim().length > 0;
 }
 
+/**
+ * Effective presence for a value with environment-specific and legacy names:
+ * the specific variable wins, the legacy one fills the gap — the same order
+ * whop-service resolves them in, so the dashboard never disagrees with the
+ * code about what is configured.
+ */
+function effective(specific: string, legacy: string): boolean {
+  return present(specific) || present(legacy);
+}
+
 export async function collectDiagnostics(): Promise<Diagnostics> {
   let orchestratorReachable = false;
   try {
@@ -48,6 +58,9 @@ export async function collectDiagnostics(): Promise<Diagnostics> {
   } catch {
     // Unreachable is the finding, not an error: the panel renders it.
   }
+
+  const production = process.env.NODE_ENV === "production";
+  const side = production ? "PROD" : "SANDBOX";
 
   return {
     node_env: process.env.NODE_ENV ?? "development",
@@ -60,9 +73,9 @@ export async function collectDiagnostics(): Promise<Diagnostics> {
     whop: {
       sandbox_key: present("WHOP_SANDBOX_API_KEY"),
       live_key: present("WHOP_LIVE_API_KEY"),
-      webhook_secret: present("WHOP_WEBHOOK_SECRET"),
-      pro_plan: present("WHOP_PRO_PLAN_ID"),
-      ultra_plan: present("WHOP_ULTRA_PLAN_ID"),
+      webhook_secret: effective(`${side}_WEBHOOK_SECRET`, "WHOP_WEBHOOK_SECRET"),
+      pro_plan: effective(`${side}_PRO_PLAN_ID`, "WHOP_PRO_PLAN_ID"),
+      ultra_plan: effective(`${side}_ULTRA_PLAN_ID`, "WHOP_ULTRA_PLAN_ID"),
     },
     github: {
       token: present("GITHUB_TOKEN"),

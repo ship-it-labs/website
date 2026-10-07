@@ -29,7 +29,9 @@ export interface EnvKey {
 export const MANAGED_ENV_KEYS: EnvKey[] = [
   { key: "WHOP_SANDBOX_API_KEY", label: "Whop sandbox key", description: "Test-mode payments. Used whenever the runtime mode is development.", secret: true },
   { key: "WHOP_LIVE_API_KEY", label: "Whop live key", description: "Real payments. Used whenever the runtime mode is production.", secret: true },
-  { key: "WHOP_WEBHOOK_SECRET", label: "Whop webhook secret", description: "Verifies incoming payment webhooks. Must match the endpoint secret.", secret: true },
+  { key: "WHOP_WEBHOOK_SECRET", label: "Whop webhook secret (legacy)", description: "Shared fallback while migrating. Prefer the environment-specific secrets below.", secret: true },
+  { key: "SANDBOX_WEBHOOK_SECRET", label: "Sandbox webhook secret", description: "Verifies development webhooks. Wins over the legacy secret in development.", secret: true },
+  { key: "PROD_WEBHOOK_SECRET", label: "Production webhook secret", description: "Verifies production webhooks. Wins over the legacy secret in production.", secret: true },
   { key: "SANDBOX_PRO_PLAN_ID", label: "Sandbox Pro plan", description: "The plan_… id selling Pro in development. Wins over WHOP_PRO_PLAN_ID when set.", secret: false },
   { key: "SANDBOX_ULTRA_PLAN_ID", label: "Sandbox Ultra plan", description: "The plan_… id selling Ultra in development. Wins over WHOP_ULTRA_PLAN_ID when set.", secret: false },
   { key: "PROD_PRO_PLAN_ID", label: "Production Pro plan", description: "The plan_… id selling Pro in production. Wins over WHOP_PRO_PLAN_ID when set.", secret: false },

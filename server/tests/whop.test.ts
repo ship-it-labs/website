@@ -268,8 +268,7 @@ describe("membership plan resolution", () => {
   });
 });
 
-describe("webhook object routing", () => {
-  // Payment and refund objects once flowed down the membership write path and
+describe("webhook object routing", () => {  // Payment and refund objects once flowed down the membership write path and
   // overwrote subscription identity with pay_/re_ ids. Routing by prefix keeps
   // every current and future non-membership shape on the status-only path.
   it("routes memberships to full handling", () => {
@@ -355,5 +354,82 @@ describe("duplicate delivery detection", () => {
     expect(isDuplicateKeyError(undefined)).toBe(false);
     expect(isDuplicateKeyError({ code: "23503", message: "insert violates foreign key" })).toBe(false);
     expect(isDuplicateKeyError({ message: "connection refused" })).toBe(false);
+  });
+});
+
+describe("environment-specific webhook secrets", () => {
+  const secretKeys = ["SANDBOX_WEBHOOK_SECRET", "PROD_WEBHOOK_SECRET", "WHOP_WEBHOOK_SECRET"];
+
+  function signWith(secret: string, body: string, id: string, timestamp: string): string {
+    const digest = crypto
+      .createHmac("sha256", Buffer.from(secret, "utf8"))
+      .update(`${id}.${timestamp}.${body}`)
+      .digest("base64");
+    return `v1,${digest}`;
+  }
+
+  beforeEach(() => {
+    for (const key of secretKeys) delete process.env[key];
+  });
+
+  // The file-level afterEach restores the whole environment afterwards.
+
+  function payload() {
+    const body = JSON.stringify({ type: "membership.activated", data: {} });
+    const id = "msg_env_test";
+    const timestamp = String(Math.floor(Date.now() / 1000));
+    return { body, id, timestamp };
+  }
+
+  it("verifies with the sandbox secret in development", async () => {
+    process.env.NODE_ENV = "development";
+    process.env.SANDBOX_WEBHOOK_SECRET = "sandbox-only-secret";
+    const { verifyWebhookSignature } = await freshService();
+    const { body, id, timestamp } = payload();
+
+    expect(
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith("sandbox-only-secret", body, id, timestamp) })
+    ).toBe(true);
+  });
+
+  it("prefers the specific secret over the legacy one", async () => {
+    process.env.NODE_ENV = "development";
+    process.env.SANDBOX_WEBHOOK_SECRET = "sandbox-only-secret";
+    process.env.WHOP_WEBHOOK_SECRET = "legacy-secret";
+    const { verifyWebhookSignature } = await freshService();
+    const { body, id, timestamp } = payload();
+
+    expect(
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith("sandbox-only-secret", body, id, timestamp) })
+    ).toBe(true);
+    expect(
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith("legacy-secret", body, id, timestamp) })
+    ).toBe(false);
+  });
+
+  it("falls back to the legacy secret when nothing specific is set", async () => {
+    process.env.NODE_ENV = "development";
+    process.env.WHOP_WEBHOOK_SECRET = "legacy-secret";
+    const { verifyWebhookSignature } = await freshService();
+    const { body, id, timestamp } = payload();
+
+    expect(
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith("legacy-secret", body, id, timestamp) })
+    ).toBe(true);
+  });
+
+  it("verifies with the production secret in production", async () => {
+    process.env.NODE_ENV = "production";
+    process.env.PROD_WEBHOOK_SECRET = "prod-only-secret";
+    process.env.SANDBOX_WEBHOOK_SECRET = "sandbox-only-secret";
+    const { verifyWebhookSignature } = await freshService();
+    const { body, id, timestamp } = payload();
+
+    expect(
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith("prod-only-secret", body, id, timestamp) })
+    ).toBe(true);
+    expect(
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith("sandbox-only-secret", body, id, timestamp) })
+    ).toBe(false);
   });
 });

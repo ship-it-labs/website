@@ -19,9 +19,19 @@ const API_VERSION_DATE = process.env.WHOP_API_VERSION_DATE || "2026-07-01";
 /**
  * Read per call so the value reflects the live environment and a missing secret
  * is caught at verification time rather than at import time.
+ *
+ * Sandbox and production endpoints sign with different secrets, so each side
+ * has its own variable, selected by runtime mode exactly like the plan ids.
+ * The shared WHOP_WEBHOOK_SECRET still works as a fallback while deployments
+ * migrate. A wrong-side secret fails verification rather than anything worse:
+ * webhooks simply 401 until the matching secret is configured.
  */
 function webhookSecret(): string {
-  return process.env.WHOP_WEBHOOK_SECRET || "";
+  const specific =
+    process.env.NODE_ENV === "production"
+      ? process.env.PROD_WEBHOOK_SECRET
+      : process.env.SANDBOX_WEBHOOK_SECRET;
+  return specific?.trim() || process.env.WHOP_WEBHOOK_SECRET || "";
 }
 
 export class WhopConfigError extends Error {
@@ -283,7 +293,7 @@ export function verifyWebhookSignature(params: {
 }): boolean {
   const secret = webhookSecret();
   if (!secret) {
-    logger.error("WHOP_WEBHOOK_SECRET is not configured; rejecting webhook");
+    logger.error("No webhook secret is configured (SANDBOX_/PROD_WEBHOOK_SECRET or WHOP_WEBHOOK_SECRET); rejecting webhook");
     return false;
   }
 
