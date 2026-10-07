@@ -190,16 +190,25 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
 
     const stopped: string[] = [];
     const failed: { id: string; error: string }[] = [];
-    for (const id of ids) {
-      try {
-        await callOrchestrator("/runtime/stop", { runtime_id: id, user_id: userId });
-        stopped.push(id);
-      } catch (err) {
-        failed.push({
-          id,
-          error: err instanceof OrchestratorError ? err.message : "Stop failed",
-        });
-      }
+    // Bound the concurrency so 10 runtimes don't await 30s each in sequence,
+    // while still avoiding a thundering herd against the orchestrator.
+    const CONCURRENCY = 4;
+    const queue = [...ids];
+    while (queue.length > 0) {
+      const batch = queue.splice(0, CONCURRENCY);
+      await Promise.all(
+        batch.map(async (id) => {
+          try {
+            await callOrchestrator("/runtime/stop", { runtime_id: id, user_id: userId });
+            stopped.push(id);
+          } catch (err) {
+            failed.push({
+              id,
+              error: err instanceof OrchestratorError ? err.message : "Stop failed",
+            });
+          }
+        })
+      );
     }
     return reply.send({ stopped, failed });
   });
