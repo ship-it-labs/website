@@ -1665,7 +1665,7 @@ function AuditSection({ onError }: { onError: (message: string | null) => void }
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [actions, setActions] = useState<string[]>([]);
   const [filter, setFilter] = useState("all");
-  const [pending, setPending] = useState(false);
+  const [pending] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
   const load = useCallback(async () => {
