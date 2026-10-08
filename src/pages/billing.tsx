@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, formatDuration } from "@/lib/api";
+import { usePageTitle } from "@/lib/page-title";
 import {
   DashboardLayout,
   Panel,
@@ -88,6 +89,7 @@ function actionFor(
 }
 
 export function BillingPage() {
+  usePageTitle("Billing");
   const [plans, setPlans] = useState<Plan[]>([]);
   const [subscription, setSubscription] = useState<Subscription | null>(null);
   const [error, setError] = useState<string | null>(null);

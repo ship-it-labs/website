@@ -23,12 +23,12 @@ export function AuthLayout({
       <AuroraBackground />
       <SiteNav />
 
-      <main className="flex min-h-screen items-center justify-center px-6 py-32">
+      <main className="flex min-h-screen items-center justify-center px-4 py-16 sm:px-6 sm:py-32">
         <div
           className="stagger w-full max-w-md"
           style={{ "--i": 0 } as React.CSSProperties}
         >
-          <div className="glass-strong rounded-3xl p-8 shadow-2xl sm:p-9">
+          <div className="glass-strong rounded-3xl p-6 shadow-2xl sm:p-9">
             <h1 className="font-serif text-3xl font-bold tracking-tight text-white">
               {title}
             </h1>

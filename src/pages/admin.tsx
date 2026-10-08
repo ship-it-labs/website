@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, formatDuration, getAccessToken } from "@/lib/api";
+import { usePageTitle } from "@/lib/page-title";
 import {
   DashboardLayout,
   Panel,
@@ -69,7 +70,7 @@ interface Plan {
   previous_price_cents: number | null;
 }
 
-type Section = "overview" | "users" | "runtimes" | "builds" | "payments" | "analytics" | "plans" | "settings" | "environment" | "database" | "webhooks" | "audit";
+type Section = "overview" | "users" | "runtimes" | "builds" | "payments" | "analytics" | "plans" | "settings" | "environment" | "database" | "webhooks" | "audit" | "feedback";
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -84,9 +85,11 @@ const SECTIONS: { id: Section; label: string }[] = [
   { id: "database", label: "Database" },
   { id: "webhooks", label: "Webhooks" },
   { id: "audit", label: "Audit" },
+  { id: "feedback", label: "Feedback" },
 ];
 
 export function AdminPage() {
+  usePageTitle("Admin");
   const [section, setSection] = useState<Section>("overview");
   const [error, setError] = useState<string | null>(null);
   const now = useNow();
@@ -143,6 +146,7 @@ export function AdminPage() {
       )}
       {section === "webhooks" && <WebhooksSection onError={setError} />}
       {section === "audit" && <AuditSection onError={setError} />}
+      {section === "feedback" && <FeedbackSection onError={setError} />}
     </DashboardLayout>
   );
 }
@@ -1061,6 +1065,7 @@ function PaymentsSection({ onError }: { onError: (message: string | null) => voi
                 value={email}
                 onChange={(event) => setEmail(event.target.value)}
                 placeholder="customer@example.com"
+                autoComplete="email"
                 className="w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none"
               />
             </label>
@@ -1073,6 +1078,8 @@ function PaymentsSection({ onError }: { onError: (message: string | null) => voi
                 value={membershipId}
                 onChange={(event) => setMembershipId(event.target.value)}
                 placeholder="mem_… (from the Whop dashboard)"
+                autoComplete="off"
+                spellCheck={false}
                 className="w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2.5 font-mono text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none"
               />
             </label>
@@ -1936,5 +1943,106 @@ function WebhooksSection({ onError }: { onError: (message: string | null) => voi
         </Panel>
       </div>
     </>
+  );
+}
+
+interface FeedbackEntry {
+  id: string;
+  user_id: string;
+  message: string;
+  is_read: boolean;
+  created_at: string;
+  sender_email: string | null;
+}
+
+// User feedback inbox. Read entries hide unless the toggle asks for them;
+// marking read is the triage action, and nothing is ever deleted here.
+function FeedbackSection({ onError }: { onError: (message: string | null) => void }) {
+  const [entries, setEntries] = useState<FeedbackEntry[]>([]);
+  const [unread, setUnread] = useState(0);
+  const [showRead, setShowRead] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const result = await api.get<{ entries: FeedbackEntry[]; unread: number }>(
+        `/api/v1/admin/feedback${showRead ? "?show_read=1" : ""}`
+      );
+      setEntries(result.entries);
+      setUnread(result.unread);
+      setLoaded(true);
+      onError(null);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Could not load feedback");
+    }
+  }, [showRead, onError]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function setRead(id: string, isRead: boolean) {
+    setBusy(id);
+    try {
+      await api.patch(`/api/v1/admin/feedback/${id}`, { is_read: isRead });
+      await load();
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Could not update feedback");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <Panel
+      title="Feedback"
+      description={
+        unread > 0 ? `${unread} unread` : "Inbox zero. Lovely."
+      }
+    >
+      <label className="mb-4 flex items-center gap-2 text-sm text-zinc-400">
+        <input
+          type="checkbox"
+          checked={showRead}
+          onChange={(event) => setShowRead(event.target.checked)}
+          className="h-4 w-4 accent-violet-500"
+        />
+        Show read entries
+      </label>
+      {!loaded ? (
+        <EmptyState>Loading…</EmptyState>
+      ) : entries.length === 0 ? (
+        <EmptyState>
+          {showRead ? "No feedback yet." : "No unread feedback."}
+        </EmptyState>
+      ) : (
+        <ul className="divide-y divide-white/[0.06]">
+          {entries.map((entry) => (
+            <li key={entry.id} className="flex items-start justify-between gap-4 py-3.5 first:pt-0 last:pb-0">
+              <div className="min-w-0">
+                <p className="truncate text-sm text-zinc-200">
+                  {entry.sender_email ?? "unknown account"}
+                </p>
+                <p className="mt-1 whitespace-pre-wrap break-words text-sm text-zinc-400">
+                  {entry.message}
+                </p>
+                <p className="mt-1 text-xs text-zinc-600">
+                  {new Date(entry.created_at).toLocaleString()}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={busy === entry.id}
+                onClick={() => setRead(entry.id, !entry.is_read)}
+                className="shrink-0 rounded-lg border border-white/10 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:border-white/20 hover:text-white disabled:opacity-40"
+              >
+                {busy === entry.id ? "…" : entry.is_read ? "Reopen" : "Mark as read"}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
   );
 }

@@ -21,9 +21,9 @@ export function ProsePage({
     <div className="relative min-h-screen bg-zinc-950 text-zinc-100">
       <AuroraBackground />
       <SiteNav />
-      <main className="px-6 pb-24 pt-36">
+      <main className="px-4 pb-24 pt-28 sm:px-6 sm:pt-36">
         <div className="mx-auto max-w-3xl">
-          <h1 className="font-serif text-4xl font-bold tracking-tight text-white sm:text-5xl">
+          <h1 className="font-serif text-3xl font-bold tracking-tight text-white sm:text-5xl">
             {title}
           </h1>
           {subtitle && (

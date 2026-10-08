@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { OfflineBanner } from "@/components/site/OfflineBanner";
+import { FeedbackButton } from "@/components/site/FeedbackButton";
 import { cn } from "@/lib/utils";
 
 const LINKS = [
@@ -162,6 +163,7 @@ export function SiteNav() {
       </div>
     </header>
     <OfflineBanner />
+    <FeedbackButton />
     </>
   );
 }

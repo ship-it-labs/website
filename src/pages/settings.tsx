@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { usePageTitle } from "@/lib/page-title";
 import {
   DashboardLayout,
   Panel,
@@ -37,6 +38,7 @@ function SectionSaved({ show }: { show: boolean }) {
 }
 
 export function SettingsPage() {
+  usePageTitle("Settings");
   const navigate = useNavigate();
   const { user, signOut } = useAuth();
 
@@ -120,6 +122,7 @@ function ProfileSection({ email }: { email: string }) {
             placeholder="new@example.com"
             maxLength={254}
             aria-label="New email address"
+            autoComplete="email"
             className="w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none"
           />
           <input

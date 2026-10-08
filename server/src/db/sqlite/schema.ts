@@ -37,6 +37,11 @@ const ADDED_COLUMNS: { table: string; column: string; definition: string }[] = [
   // Which executor ran each build ("github" or "runtime"). Nullable because
   // builds created before executors were recorded have no value.
   { table: "builds", column: "executor", definition: "text" },
+  // Project language + encrypted runtime env; language per build. See 0015.
+  // Nullable: rows created before languages existed predate the columns.
+  { table: "projects", column: "language", definition: "text" },
+  { table: "projects", column: "env_ciphertext", definition: "text" },
+  { table: "builds", column: "language", definition: "text" },
 ];
 
 /** Columns removed from the schema, dropped from existing databases. */
@@ -162,6 +167,8 @@ create table if not exists projects (
   upload_sha256 text,
   upload_bytes integer not null default 0,
   file_count integer not null default 0,
+  language text,
+  env_ciphertext text,
   created_at text not null default (datetime('now')),
   updated_at text not null default (datetime('now'))
 );
@@ -180,6 +187,7 @@ create table if not exists builds (
   exit_code integer,
   timeout_seconds integer not null default 180,
   executor text,
+  language text,
   started_at text,
   completed_at text,
   created_at text not null default (datetime('now'))
@@ -252,6 +260,30 @@ create table if not exists webhook_events (
   created_at text not null default (datetime('now'))
 );
 create index if not exists idx_webhook_events_key on webhook_events(idempotency_key);
+create index if not exists idx_webhook_events_processed on webhook_events(provider, processed, created_at);
+
+-- Who did what to whom: every privileged admin mutation leaves one row here.
+-- Append-only by convention; see 0013.
+create table if not exists admin_audit (
+  id text primary key,
+  admin_id text not null,
+  action text not null,
+  target text,
+  detail text,
+  created_at text not null default (datetime('now'))
+);
+create index if not exists idx_admin_audit_created on admin_audit(created_at);
+
+-- User feedback for the admin panel. Sender email resolves at read time from
+-- users; read entries hide by default but stay for history. See 0016.
+create table if not exists feedback (
+  id text primary key,
+  user_id text not null references users(id) on delete cascade,
+  message text not null,
+  is_read integer not null default 0,
+  created_at text not null default (datetime('now'))
+);
+create index if not exists idx_feedback_unread on feedback(is_read, created_at desc);
 
 -- Platform kill switches and overrides, edited from the admin panel. A missing
 -- row means the default: signups open, executor automatic.
@@ -275,6 +307,7 @@ create table if not exists user_sessions (
   last_seen_at text not null default (datetime('now'))
 );
 create index if not exists idx_user_sessions_user on user_sessions(user_id);
+create index if not exists idx_user_sessions_token on user_sessions(token_hash, user_id);
 
 -- Notification and display preferences. Stored before anything consumes them
 -- so the settings page writes somewhere real from day one.

@@ -16,6 +16,8 @@ import {
   GitHubDispatchError,
 } from "../services/build-service.js";
 import { resolveBuildExecutorWithSettings } from "../services/build-executor.js";
+import { isLanguage } from "../services/languages.js";
+import { parseEnvVars, EnvCryptoError } from "../utils/env-crypto.js";
 import { triggerRuntimeBuild } from "../services/runtime-build.js";
 import { recordBuild } from "../services/quota-service.js";
 import { isCommandAllowed, firstBlockedCommand } from "../services/command-guard.js";
@@ -34,6 +36,10 @@ const buildSchema = z
     install_commands: z.array(z.string().min(1)).max(20).default([]),
     build_commands: z.array(z.string().min(1)).max(20).default([]),
     test_commands: z.array(z.string().min(1)).max(20).default([]),
+    language: z.string().optional(),
+    // Build-time environment (registry tokens, build flags). Validated and
+    // forwarded to the runner only — never stored, never logged.
+    env: z.record(z.string(), z.string()).optional(),
   })
   .refine(
     (value) =>
@@ -80,7 +86,7 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
 
     const { data: project } = await supabase
       .from("projects")
-      .select("id, upload_sha256, repo_url")
+      .select("id, upload_sha256, repo_url, language")
       .eq("id", project_id)
       .eq("user_id", req.auth!.userId)
       .single();
@@ -89,14 +95,41 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(404).send({ error: { code: "PROJECT_NOT_FOUND", message: "Project not found" } });
     }
 
+    // An explicit valid declaration wins; otherwise the build inherits the
+    // project's language so the workflow sets up the right toolchain without
+    // the caller repeating it on every submit.
+    const proj = project as { language?: unknown };
+    const buildLanguage = isLanguage(parsed.data.language)
+      ? parsed.data.language
+      : isLanguage(proj.language)
+        ? proj.language
+        : null;
+
     const build = await createBuild(
       req.auth!.userId,
       project_id,
       install_commands,
       build_commands,
       test_commands,
-      req.auth!.plan.build_timeout_seconds
+      req.auth!.plan.build_timeout_seconds,
+      buildLanguage
     );
+
+    // Build env is validated here so a malformed map fails before dispatch,
+    // not mid-run on the runner. Values are never logged.
+    let buildEnv: Record<string, string> | undefined;
+    if (parsed.data.env !== undefined) {
+      try {
+        buildEnv = parseEnvVars(parsed.data.env);
+      } catch (err) {
+        return reply.status(400).send({
+          error: {
+            code: "VALIDATION_ERROR",
+            message: err instanceof EnvCryptoError ? err.message : "Invalid env",
+          },
+        });
+      }
+    }
 
     try {
       const executor = await resolveBuildExecutorWithSettings();
@@ -114,7 +147,10 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
       // it cannot, so the build runs in the platform's own runtime instead of
       // failing at the download step.
       if (executor === "github") {
-        await triggerGitHubActionsBuild(build.id);
+        // Rebuilds cannot resupply build env (it is never stored), so only the
+        // fresh submit path carries it; the rebuild call below dispatches
+        // without.
+        await triggerGitHubActionsBuild(build.id, buildEnv ? { buildEnv } : undefined);
       } else {
         await triggerRuntimeBuild(build.id);
       }
@@ -201,7 +237,8 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
       toCommands(previous.install_commands),
       toCommands(previous.build_commands),
       toCommands(previous.test_commands),
-      req.auth!.plan.build_timeout_seconds
+      req.auth!.plan.build_timeout_seconds,
+      (previous as { language?: string | null }).language ?? null
     );
 
     try {

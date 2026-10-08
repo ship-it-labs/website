@@ -73,6 +73,7 @@ export interface Build {
   completed_at: string | null;
   timeout_seconds: number;
   created_at: string;
+  language?: string | null;
 }
 
 export interface Artifact {

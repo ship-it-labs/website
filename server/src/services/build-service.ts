@@ -15,7 +15,8 @@ export async function createBuild(
   installCommands: string[],
   buildCommands: string[],
   testCommands: string[],
-  timeoutSeconds: number
+  timeoutSeconds: number,
+  language?: string | null
 ): Promise<Build> {
   const id = `build_${uuidv4().slice(0, 12)}`;
 
@@ -29,6 +30,9 @@ export async function createBuild(
       install_commands: installCommands,
       build_commands: buildCommands,
       test_commands: testCommands,
+      // Which toolchain the GH workflow should set up. Null means the project
+      // default applies; the workflow resolves it the same way the upload did.
+      language: language ?? null,
       // A plan row edited by hand (or a stale auth token) must not grant an
       // unbounded build: the value is clamped to a sane window here so every
       // caller is covered, including the rebuild route.
@@ -45,7 +49,10 @@ export async function createBuild(
   return data as Build;
 }
 
-export async function triggerGitHubActionsBuild(buildId: string): Promise<void> {
+export async function triggerGitHubActionsBuild(
+  buildId: string,
+  options?: { buildEnv?: Record<string, string> }
+): Promise<void> {
   const { data: build, error } = await supabase
     .from("builds")
     .select("*")
@@ -58,7 +65,7 @@ export async function triggerGitHubActionsBuild(buildId: string): Promise<void> 
 
   const { data: project, error: projectError } = await supabase
     .from("projects")
-    .select("upload_path, upload_url, upload_sha256, repo_url")
+    .select("upload_path, upload_url, upload_sha256, repo_url, run_command, language")
     .eq("id", build.project_id)
     .single();
 
@@ -99,6 +106,9 @@ export async function triggerGitHubActionsBuild(buildId: string): Promise<void> 
           Authorization: `Bearer ${githubToken()}`,
           Accept: "application/vnd.github.v3+json",
         },
+        // build_env is intentionally NOT logged anywhere: it can carry registry
+        // tokens and build secrets. It travels to the runner and dies there —
+        // it is never stored on the build row.
         body: JSON.stringify({
           ref: "main",
           inputs: {
@@ -110,6 +120,9 @@ export async function triggerGitHubActionsBuild(buildId: string): Promise<void> 
             source_sha256: project.upload_sha256 ?? "",
             checkout_url: project.repo_url ?? "",
             checkout_ref: "",
+            language: build.language ?? project.language ?? "",
+            run_command: project.run_command ?? "",
+            build_env: JSON.stringify(options?.buildEnv ?? {}),
           },
         }),
       }
@@ -270,8 +283,7 @@ export async function setBuildExecutor(buildId: string, executor: string): Promi
  * Storage objects behind artifact URLs are left alone: they expire with the
  * bucket lifecycle rather than blocking the delete.
  */
-export async function removeBuild(buildId: string): Promise<void> {
-  await supabase.from("build_logs").delete().eq("build_id", buildId);
+export async function removeBuild(buildId: string): Promise<void> {  await supabase.from("build_logs").delete().eq("build_id", buildId);
   await supabase.from("artifacts").delete().eq("build_id", buildId);
   const { error } = await supabase.from("builds").delete().eq("id", buildId);
   if (error) {
@@ -280,8 +292,7 @@ export async function removeBuild(buildId: string): Promise<void> {
   }
 }
 
-export async function getBuild(buildId: string): Promise<Build | null> {
-  const { data, error } = await supabase
+export async function getBuild(buildId: string): Promise<Build | null> {  const { data, error } = await supabase
     .from("builds")
     .select("*")
     .eq("id", buildId)
@@ -299,6 +310,86 @@ export async function listBuilds(userId: string, limit = 20): Promise<Build[]> {
     .limit(limit);
   if (error) return [];
   return data as Build[];
+}
+
+export interface BundleArtifact {
+  build_id: string;
+  storage_path: string;
+  sha256: string;
+  size_bytes: number;
+}
+
+/**
+ * Records the self-contained runtime bundle a workflow uploaded for a build.
+ * Replace semantics: a retried upload overwrites rather than duplicating, and
+ * the storage object keeps the deterministic `bundles/<buildId>.zip` path so
+ * an overwrite never orphans a file under a new name.
+ */
+export async function recordBundleArtifact(
+  buildId: string,
+  bundle: { sha256: string; sizeBytes: number; storagePath: string }
+): Promise<void> {
+  await supabase.from("artifacts").delete().eq("build_id", buildId).eq("name", "bundle.zip");
+
+  const { error } = await supabase.from("artifacts").insert({
+    id: `art_bundle_${buildId}`,
+    build_id: buildId,
+    name: "bundle.zip",
+    sha256: bundle.sha256,
+    size: bundle.sizeBytes,
+    url: bundle.storagePath,
+  });
+
+  if (error) {
+    logger.error({ error, buildId }, "Failed to record bundle artifact");
+    throw new Error("Failed to record bundle artifact");
+  }
+}
+
+/**
+ * The newest bundle belonging to a successful build of this project. Runtime
+ * start prefers it over the raw source archive; null means no bundle exists
+ * yet and the archive flow applies.
+ */
+export async function latestBundleArtifact(
+  userId: string,
+  projectId: string
+): Promise<BundleArtifact | null> {
+  const { data: builds } = await supabase
+    .from("builds")
+    .select("id")
+    .eq("user_id", userId)
+    .eq("project_id", projectId)
+    .eq("status", "success")
+    .order("created_at", { ascending: false })
+    .limit(10);
+
+  const ids = ((builds ?? []) as { id: string }[]).map((b) => b.id);
+  if (ids.length === 0) return null;
+
+  const { data: rows } = await supabase
+    .from("artifacts")
+    .select("build_id, sha256, size, url")
+    .in("build_id", ids)
+    .eq("name", "bundle.zip");
+
+  const byBuild = new Map(
+    ((rows ?? []) as { build_id: string; sha256: string; size: number; url: string }[]).map(
+      (r) => [r.build_id, r]
+    )
+  );
+  for (const id of ids) {
+    const row = byBuild.get(id);
+    if (row) {
+      return {
+        build_id: id,
+        storage_path: row.url,
+        sha256: row.sha256,
+        size_bytes: row.size,
+      };
+    }
+  }
+  return null;
 }
 
 export async function updateBuildStatus(

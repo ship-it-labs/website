@@ -3,6 +3,14 @@ import { FastifyInstance } from "fastify";
 import { authenticateApiKey } from "../middleware/auth.js";
 import { supabase } from "../db/index.js";
 import { logger } from "../utils/logger.js";
+import { resolveLanguage } from "../services/languages.js";
+import {
+  parseEnvVars,
+  encryptEnvVars,
+  projectEnvKey,
+  EnvConfigError,
+  EnvCryptoError,
+} from "../utils/env-crypto.js";
 
 const MAX_UPLOAD_BYTES = 400 * 1024 * 1024;
 const BUCKET = "project-uploads";
@@ -15,6 +23,8 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     let projectId: string | null = null;
     let projectName: string | null = null;
     let runCommand: string | null = null;
+    let declaredLanguage: string | null = null;
+    let envRaw: string | null = null;
     let manifest: { files: string[]; total_bytes: number; excluded: string[] } | null = null;
     let archive: Buffer | null = null;
     let filename: string | null = null;
@@ -44,6 +54,8 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
           if (part.fieldname === "project_id") projectId = value;
           if (part.fieldname === "project_name") projectName = value;
           if (part.fieldname === "run_command") runCommand = value;
+          if (part.fieldname === "language") declaredLanguage = value;
+          if (part.fieldname === "env") envRaw = value;
           if (part.fieldname === "manifest") manifest = JSON.parse(value);
         }
       }
@@ -104,12 +116,70 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
 
     const now = new Date().toISOString();
 
+    // The AI declares the language; the archive contents arbitrate. A wrong
+    // declaration would otherwise send the project to a toolchain that cannot
+    // build it, and the failure would surface minutes later in CI.
+    const resolved = resolveLanguage(
+      declaredLanguage || undefined,
+      manifest?.files ?? []
+    );
+    if (resolved.note) {
+      logger.info(
+        { userId, projectId, note: resolved.note },
+        "Upload language resolved by detection"
+      );
+    }
+
+    // A re-upload without env keeps the previous env: wiping secrets because
+    // a later upload omitted the field would be a silent, baffling breakage.
+    // An explicit env (even {}) replaces it.
+    let envCiphertext: string | null | undefined;
+    if (envRaw === null) {
+      const { data: prior } = await supabase
+        .from("projects")
+        .select("env_ciphertext")
+        .eq("id", projectId)
+        .eq("user_id", userId)
+        .single();
+      envCiphertext = (prior as { env_ciphertext?: string | null } | null)?.env_ciphertext ?? null;
+    } else if (envRaw.trim() === "") {
+      envCiphertext = null;
+    } else {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(envRaw);
+      } catch {
+        return reply.status(400).send({
+          error: { code: "VALIDATION_ERROR", message: "env must be a JSON object" },
+        });
+      }
+      try {
+        const vars = parseEnvVars(parsed);
+        envCiphertext = encryptEnvVars(vars, projectEnvKey());
+      } catch (err) {
+        if (err instanceof EnvConfigError) {
+          logger.error({ userId, projectId }, "Project env submitted without PROJECT_ENV_KEY");
+          return reply.status(500).send({
+            error: { code: "ENV_NOT_CONFIGURED", message: "Project environments are not enabled on this deployment" },
+          });
+        }
+        return reply.status(400).send({
+          error: {
+            code: "VALIDATION_ERROR",
+            message: err instanceof EnvCryptoError ? err.message : "Invalid env",
+          },
+        });
+      }
+    }
+
     const { error: projectError } = await supabase.from("projects").upsert(
       {
         id: projectId,
         user_id: userId,
         name: projectName || projectId,
         run_command: runCommand,
+        language: resolved.language,
+        env_ciphertext: envCiphertext,
         upload_id: uploadId,
         upload_path: storagePath,
         upload_url: signed.signedUrl,
@@ -129,7 +199,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     }
 
     logger.info(
-      { userId, projectId, uploadId, bytes: archive.length },
+      { userId, projectId, uploadId, bytes: archive.length, language: resolved.language },
       "Project uploaded"
     );
 
@@ -138,6 +208,8 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       upload_id: uploadId,
       sha256,
       filename,
+      language: resolved.language,
+      language_note: resolved.note,
       file_count: manifest?.files?.length ?? 0,
       total_bytes: archive.length,
       excluded: manifest?.excluded ?? [],

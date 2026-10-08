@@ -462,3 +462,60 @@ alter table public.subscriptions
 alter table public.builds
   add column if not exists executor text;
 ;
+-- ============================================================================
+-- migrations/0013_admin_audit.sql
+-- ============================================================================
+-- Who did what to whom: every privileged admin mutation leaves one row here.
+-- Append-only by convention (no route updates or deletes these rows).
+create table if not exists public.admin_audit (
+  id uuid primary key default gen_random_uuid(),
+  admin_id text not null,
+  action text not null,
+  target text,
+  detail text,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_admin_audit_created on public.admin_audit(created_at);
+;
+-- ============================================================================
+-- migrations/0014_webhook_processed_index.sql
+-- ============================================================================
+-- Webhook log lookups by processing state, plus per-request session lookups.
+create index if not exists idx_webhook_events_processed
+  on public.webhook_events(provider, processed, created_at);
+
+create index if not exists idx_user_sessions_token
+  on public.user_sessions(token_hash, user_id);
+;
+-- ============================================================================
+-- migrations/0015_project_language.sql
+-- ============================================================================
+-- Which language toolchain builds each project, plus the project's runtime
+-- environment (encrypted by the app layer; this column holds ciphertext, never
+-- plaintext). Builds record the language too. All nullable: rows created
+-- before languages existed predate the columns.
+alter table public.projects
+  add column if not exists language text;
+alter table public.projects
+  add column if not exists env_ciphertext text;
+alter table public.builds
+  add column if not exists language text;
+;
+-- ============================================================================
+-- migrations/0016_feedback.sql
+-- ============================================================================
+-- User feedback for the admin panel. The sender's email is resolved at read
+-- time from the users table (never duplicated here), and read entries stay
+-- for history — the panel hides them by default instead of deleting.
+create table if not exists public.feedback (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  message text not null,
+  is_read boolean not null default false,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_feedback_unread
+  on public.feedback(is_read, created_at desc);
+;

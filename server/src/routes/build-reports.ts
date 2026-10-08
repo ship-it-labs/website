@@ -1,8 +1,9 @@
 import { timingSafeEqual } from "node:crypto";
+import crypto from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { supabase } from "../db/index.js";
-import { updateBuildStatus, getBuild } from "../services/build-service.js";
+import { updateBuildStatus, getBuild, recordBundleArtifact } from "../services/build-service.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -96,7 +97,96 @@ export function capLogs(
   return kept;
 }
 
+/** Largest bundle the control plane accepts. Runtimes with more footprint
+ * than this do not fit the sandbox model anyway (see the 5GB per-runtime
+ * watchdog on the agent); the workflow stays under it by excluding caches. */
+const MAX_BUNDLE_BYTES = 300 * 1024 * 1024;
+const BUNDLE_BUCKET = "project-uploads";
+
 export async function buildReportRoutes(app: FastifyInstance): Promise<void> {
+  // Receives a workflow-built runtime bundle: the self-contained app +
+  // toolchain the sandbox executes instead of raw source. Authenticated by the
+  // same shared token as the report endpoint, since the caller is the same
+  // workflow. Replace semantics: re-uploads overwrite.
+  app.post("/builds/:id/bundle", async (req, reply) => {
+    const expected = process.env.BUILD_REPORT_TOKEN ?? "";
+    if (!secretMatches(secretFromHeader(req), expected)) {
+      return reply.status(401).send({
+        error: { code: "UNAUTHORIZED", message: "Invalid build report token" },
+      });
+    }
+
+    const { id } = req.params as { id: string };
+    const build = await getBuild(id);
+    if (!build) {
+      return reply
+        .status(404)
+        .send({ error: { code: "BUILD_NOT_FOUND", message: "Build not found" } });
+    }
+
+    let bundle: Buffer | null = null;
+    try {
+      for await (const part of req.parts()) {
+        if (part.type !== "file" || part.fieldname !== "file") continue;
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const chunk of part.file) {
+          size += chunk.length;
+          if (size > MAX_BUNDLE_BYTES) {
+            return reply.status(413).send({
+              error: { code: "BUNDLE_TOO_LARGE", message: "Bundle exceeds the 300MB limit" },
+            });
+          }
+          chunks.push(chunk as Buffer);
+        }
+        bundle = Buffer.concat(chunks);
+      }
+    } catch (err) {
+      logger.error({ err, buildId: id }, "Bundle upload parse failed");
+      return reply.status(400).send({
+        error: { code: "INVALID_UPLOAD", message: "Could not read the bundle upload" },
+      });
+    }
+
+    if (!bundle || bundle.length === 0) {
+      return reply.status(400).send({
+        error: { code: "VALIDATION_ERROR", message: "file is required" },
+      });
+    }
+
+    const sha256 = crypto.createHash("sha256").update(bundle).digest("hex");
+    const storagePath = `bundles/${id}.zip`;
+
+    const { error: uploadError } = await supabase.storage
+      .from(BUNDLE_BUCKET)
+      .upload(storagePath, bundle, {
+        contentType: "application/zip",
+        upsert: true,
+      });
+
+    if (uploadError) {
+      logger.error({ err: uploadError, buildId: id }, "Bundle storage upload failed");
+      return reply.status(502).send({
+        error: { code: "STORAGE_UNAVAILABLE", message: "Failed to store the bundle" },
+      });
+    }
+
+    try {
+      await recordBundleArtifact(id, {
+        sha256,
+        sizeBytes: bundle.length,
+        storagePath,
+      });
+    } catch {
+      return reply.status(500).send({
+        error: { code: "INTERNAL_ERROR", message: "Failed to record the bundle" },
+      });
+    }
+
+    logger.info({ buildId: id, bytes: bundle.length, sha256 }, "Recorded runtime bundle");
+    return reply.send({ ok: true, sha256, bytes: bundle.length });
+  });
+
   app.post("/builds/:id/report", async (req, reply) => {
     const expected = process.env.BUILD_REPORT_TOKEN ?? "";
     if (!secretMatches(secretFromHeader(req), expected)) {

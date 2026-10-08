@@ -93,8 +93,10 @@ describe("admin audit", () => {
   });
 
   it("writes a row when the table exists", async () => {
+    // The audit table ships in the schema now; IF NOT EXISTS keeps this
+    // passing on databases both with and without it.
     client.execRaw(
-      `create table admin_audit (
+      `create table if not exists admin_audit (
         id text primary key,
         admin_id text not null,
         action text not null,
@@ -124,12 +126,12 @@ describe("admin audit", () => {
 });
 
 describe("table counts", () => {
-  it("counts seeded tables and nulls the unmigrated audit table", async () => {
+  it("counts seeded tables including the wired audit table", async () => {
     const counts = await collectTableCounts(client);
     const byTable = Object.fromEntries(counts.map((c) => [c.table, c.rows]));
-    // Plans are seeded, so the probe demonstrably works; admin_audit is not
-    // yet in the sqlite schema, so it must report unknown rather than throw.
+    // Plans are seeded, so the probe demonstrably works; admin_audit ships in
+    // the schema since 0013 was wired, so it counts instead of nulling.
     expect(typeof byTable.plans).toBe("number");
-    expect(byTable.admin_audit).toBeNull();
+    expect(typeof byTable.admin_audit).toBe("number");
   });
 });

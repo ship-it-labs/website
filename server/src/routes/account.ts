@@ -1,4 +1,5 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { supabase, usingSqlite } from "../db/index.js";
 import { authenticateApiKey } from "../middleware/auth.js";
@@ -356,8 +357,7 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
     return reply.send({ success: true });
   });
 
-  app.delete("/account/sessions", async (req, reply) => {
-    // Everything except this request's own session, which stays alive so the
+  app.delete("/account/sessions", async (req, reply) => {    // Everything except this request's own session, which stays alive so the
     // response — and the page behind it — keeps working.
     await revokeAllSessions(req.auth!.userId, bearerToken(req) || undefined);
 
@@ -375,6 +375,48 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
     }
 
     return reply.send({ success: true });
+  });
+
+  // User feedback for the admin panel. Rate-limited per IP so the inbox cannot
+  // be flooded; the sender is always the authenticated account, never a
+  // caller-supplied address.
+  app.post("/feedback", async (req, reply) => {
+    const parsed = z
+      .object({ message: z.string().trim().min(1).max(2000) })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: { code: "VALIDATION_ERROR", message: "Message must be 1-2000 characters" },
+      });
+    }
+
+    const limit = checkRateLimit(`feedback:${req.ip}`, 5, 60_000);
+    if (!limit.allowed) {
+      return reply.status(429).send({
+        error: {
+          code: "RATE_LIMITED",
+          message: "Too much feedback at once. Wait a moment and try again.",
+          retry_after_seconds: limit.retryAfterSeconds,
+        },
+      });
+    }
+
+    const { error } = await supabase.from("feedback").insert({
+      id: randomUUID(),
+      user_id: req.auth!.userId,
+      message: parsed.data.message,
+    });
+
+    if (error) {
+      // A missing table (pre-0016 database) must not 500 the button — the
+      // admin runs the migration and later messages flow again.
+      logger.warn({ err: error, userId: req.auth!.userId }, "Feedback insert failed");
+      return reply.status(500).send({
+        error: { code: "INTERNAL_ERROR", message: "Could not send feedback right now" },
+      });
+    }
+
+    return reply.status(201).send({ success: true });
   });
 
   app.delete("/account", async (req, reply) => {

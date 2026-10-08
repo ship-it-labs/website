@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { api, formatDuration } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { usePageTitle } from "@/lib/page-title";
+import { useCopy } from "@/lib/use-copy";
+import { useShowMore, ShowMoreButton } from "@/components/site/ShowMore";
 import {
   DashboardLayout,
   Panel,
@@ -10,6 +13,7 @@ import {
 } from "@/components/site/DashboardLayout";
 import { BuildLogViewer } from "@/components/site/BuildLogViewer";
 import { RuntimeDetail } from "@/components/site/RuntimeDetail";
+import { PluginPopup } from "@/components/site/PluginPopup";
 import {
   LeaseCountdown,
   useNow,
@@ -55,32 +59,6 @@ interface Build {
   github_run_url: string | null;
 }
 
-// Copies text, falling back to a hidden textarea when the async clipboard API
-// is unavailable (non-secure contexts). NOTE (Batch 4): consolidate the three
-// copies of this helper (dashboard, RuntimeDetail, BuildLogViewer) into one
-// useCopy hook.
-async function copyText(text: string): Promise<boolean> {
-  try {
-    await navigator.clipboard.writeText(text);
-    return true;
-  } catch {
-    try {
-      const area = document.createElement("textarea");
-      area.value = text;
-      area.setAttribute("readonly", "");
-      area.style.position = "fixed";
-      area.style.opacity = "0";
-      document.body.appendChild(area);
-      area.select();
-      const ok = document.execCommand("copy");
-      document.body.removeChild(area);
-      return ok;
-    } catch {
-      return false;
-    }
-  }
-}
-
 // Seconds between start and finish, or start and now while still running.
 // Null when the build never started, so the row hides the duration.
 function buildDurationSeconds(
@@ -101,7 +79,9 @@ const TERMINAL_BUILD = new Set(["success", "failure", "timeout"]);
 const BUILD_FILTERS = ["all", "pending", "running", "success", "failure", "timeout"] as const;
 
 export function DashboardPage() {
+  usePageTitle("Dashboard");
   const { user } = useAuth();
+  const { copy: handleCopy } = useCopy();
   const [usage, setUsage] = useState<Usage | null>(null);
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
   const [builds, setBuilds] = useState<Build[]>([]);
@@ -118,6 +98,21 @@ export function DashboardPage() {
   const now = useNow();
 
   const welcome = new URLSearchParams(window.location.search).has("welcome");
+  // First-signup connect walkthrough. Shown once: without the plugin the
+  // account cannot do anything, and localStorage (not the server) remembers
+  // the dismissal because it is pure UI state.
+  const [showPluginPopup, setShowPluginPopup] = useState(
+    () => welcome && localStorage.getItem("shipit.seen_plugin_popup") !== "1"
+  );
+
+  const dismissPluginPopup = () => {
+    try {
+      localStorage.setItem("shipit.seen_plugin_popup", "1");
+    } catch {
+      // Private mode: the popup simply returns next visit.
+    }
+    setShowPluginPopup(false);
+  };
 
   const load = useCallback(async () => {
     try {
@@ -209,6 +204,9 @@ export function DashboardPage() {
   const visibleBuilds =
     buildFilter === "all" ? builds : builds.filter((b) => b.status === buildFilter);
 
+  const runtimePager = useShowMore(visibleRuntimes, 8);
+  const buildPager = useShowMore(visibleBuilds, 8);
+
   const flashCopied = (key: string) => {
     setCopied(key);
     window.setTimeout(() => {
@@ -217,11 +215,13 @@ export function DashboardPage() {
   };
 
   const copyUrl = async (url: string) => {
-    if (await copyText(url)) flashCopied(`url:${url}`);
+    const ok = await handleCopy(url);
+    if (ok) flashCopied(`url:${url}`);
   };
 
   const copyBuildId = async (id: string) => {
-    if (await copyText(id)) flashCopied(`build:${id}`);
+    const ok = await handleCopy(id);
+    if (ok) flashCopied(`build:${id}`);
   };
 
   const stopAll = async () => {
@@ -281,6 +281,7 @@ export function DashboardPage() {
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <StatTile
           label="Plan"
+          loading={!usage}
           value={usage?.plan.name ?? "—"}
           detail={
             usage
@@ -394,8 +395,9 @@ export function DashboardPage() {
               {visibleRuntimes.length === 0 ? (
                 <EmptyState>No runtimes match this filter.</EmptyState>
               ) : (
+                <>
                 <ul className="divide-y divide-white/[0.06]">
-                  {visibleRuntimes.slice(0, 8).map((runtime) => (
+                  {runtimePager.visible.map((runtime) => (
                     <li key={runtime.id} className="flex items-start gap-2 py-3.5 first:pt-0 last:pb-0">
                       <button
                         type="button"
@@ -460,6 +462,13 @@ export function DashboardPage() {
                     </li>
                   ))}
                 </ul>
+                <ShowMoreButton
+                  expanded={runtimePager.expanded}
+                  hidden={runtimePager.hidden}
+                  onToggle={runtimePager.toggle}
+                  expandLabel={(n) => `Show ${n} more runtimes`}
+                />
+                </>
               )}
             </>
           )}
@@ -488,8 +497,9 @@ export function DashboardPage() {
           ) : visibleBuilds.length === 0 ? (
             <EmptyState>No builds with this status.</EmptyState>
           ) : (
+            <>
             <ul className="divide-y divide-white/[0.06]">
-              {visibleBuilds.slice(0, 8).map((build) => {
+              {buildPager.visible.map((build) => {
                 const duration = buildDurationSeconds(build, now);
                 const isActive = !TERMINAL_BUILD.has(build.status);
                 return (
@@ -585,6 +595,13 @@ export function DashboardPage() {
                 );
               })}
             </ul>
+            <ShowMoreButton
+              expanded={buildPager.expanded}
+              hidden={buildPager.hidden}
+              onToggle={buildPager.toggle}
+              expandLabel={(n) => `Show ${n} more builds`}
+            />
+            </>
           )}
         </Panel>
       </div>
@@ -596,6 +613,8 @@ export function DashboardPage() {
           onClose={() => setOpenBuild(null)}
         />
       )}
+
+      {showPluginPopup && <PluginPopup onClose={dismissPluginPopup} />}
 
       {openRuntime && (
         <RuntimeDetail

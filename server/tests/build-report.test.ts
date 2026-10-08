@@ -44,14 +44,18 @@ describe("report log capping", () => {
     expect(capped[0].content).toContain("truncated");
   });
 
-  it("keeps the head of the log when it overflows", () => {
+  it("keeps the tail of the log when it overflows", () => {
+    // Build errors live at the end of the output: dropping the earliest lines
+    // keeps the diagnosis, dropping the tail would keep the preamble and lose
+    // the failure.
     const logs = Array.from({ length: 50 }, (_, i) =>
       line(`line ${i} ` + "x".repeat(10 * 1024))
     );
     const capped = capLogs(logs);
 
-    expect(capped[0].content).toContain("line 0");
-    expect(capped[capped.length - 1].stream).toBe("system");
+    expect(capped[0].stream).toBe("system");
+    expect(capped[0].content).toContain("truncated");
+    expect(capped[capped.length - 1].content).toContain("line 49");
   });
 });
 

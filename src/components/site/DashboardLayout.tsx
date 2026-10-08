@@ -2,6 +2,7 @@ import { useEffect, useState, type ReactNode } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { AuroraBackground } from "@/components/site/AuroraBackground";
 import { OfflineBanner } from "@/components/site/OfflineBanner";
+import { FeedbackButton } from "@/components/site/FeedbackButton";
 import { Skeleton } from "@/components/site/Skeleton";
 import { useAuth } from "@/lib/auth-context";
 import { cn } from "@/lib/utils";
@@ -109,14 +110,15 @@ export function DashboardLayout({
         )}
       </header>
 
-      <main className="px-6 py-12">
+      <main className="px-4 py-8 sm:px-6 sm:py-12">
         <div className="mx-auto max-w-6xl">
-          <h1 className="font-serif text-4xl font-bold tracking-tight text-white">{title}</h1>
+          <h1 className="font-serif text-3xl font-bold tracking-tight text-white sm:text-4xl">{title}</h1>
           <p className="mt-2 text-sm text-zinc-400">{subtitle}</p>
           <div className="mt-10">{children}</div>
         </div>
       </main>
       <OfflineBanner />
+      <FeedbackButton />
     </div>
   );
 }
@@ -168,7 +170,7 @@ export function StatTile({
       {loading ? (
         <Skeleton className="mt-2 h-9 w-24" />
       ) : (
-        <p className="mt-2 font-serif text-3xl font-bold tracking-tight text-white">{value}</p>
+        <p className="mt-2 font-serif text-2xl font-bold tracking-tight text-white sm:text-3xl">{value}</p>
       )}
       {detail && <p className="mt-1 text-xs text-zinc-500">{detail}</p>}
     </div>

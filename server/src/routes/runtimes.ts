@@ -4,6 +4,8 @@ import { authenticateApiKey } from "../middleware/auth.js";
 import { supabase } from "../db/index.js";
 import { getQuotaStatus } from "../services/quota-service.js";
 import { callOrchestrator } from "../services/orchestrator-client.js";
+import { latestBundleArtifact } from "../services/build-service.js";
+import { decryptEnvVars, projectEnvKey } from "../utils/env-crypto.js";
 import { logger } from "../utils/logger.js";
 
 const startSchema = z.object({
@@ -74,7 +76,7 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
     // empty, which left the container with nothing to run.
     const { data: project, error: projectError } = await supabase
       .from("projects")
-      .select("id, run_command, upload_path, upload_sha256")
+      .select("id, run_command, language, env_ciphertext, upload_path, upload_sha256")
       .eq("id", projectId)
       .eq("user_id", userId)
       .single();
@@ -104,10 +106,62 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
     }
 
     try {
+      const row = project as {
+        run_command?: string | null;
+        language?: string | null;
+        env_ciphertext?: string | null;
+      };
+
+      // The sandbox needs plaintext env, so decryption happens here — the last
+      // trusted hop — and the values travel only inside the signed start call.
+      // A project that predates environments simply starts with none.
+      let env: Record<string, string> = {};
+      if (row.env_ciphertext) {
+        try {
+          env = decryptEnvVars(row.env_ciphertext, projectEnvKey());
+        } catch (err) {
+          logger.error({ err, projectId }, "Project env could not be decrypted");
+          return reply.status(500).send({
+            error: {
+              code: "ENV_UNREADABLE",
+              message: "The project's stored environment could not be read. Re-upload it with env to continue.",
+            },
+          });
+        }
+      }
+
+      // A successful build's bundle runs instead of raw source: it carries the
+      // toolchain and dependencies the sandbox host does not have. Missing
+      // means no bundle was ever uploaded, and the archive flow applies.
+      let bundleUrl = "";
+      let bundleSha256 = "";
+      try {
+        const bundle = await latestBundleArtifact(userId, projectId);
+        if (bundle) {
+          const { data: signedBundle, error: bundleSignError } = await supabase.storage
+            .from("project-uploads")
+            .createSignedUrl(bundle.storage_path, SOURCE_URL_TTL_SECONDS);
+          if (!bundleSignError && signedBundle?.signedUrl) {
+            bundleUrl = signedBundle.signedUrl;
+            bundleSha256 = bundle.sha256;
+          } else {
+            logger.warn({ err: bundleSignError, projectId }, "Could not sign bundle URL; using source archive");
+          }
+        }
+      } catch (err) {
+        // Best-effort: a bundle lookup failure must not block starting from
+        // source, which is the long-standing behavior.
+        logger.warn({ err, projectId }, "Bundle lookup failed; using source archive");
+      }
+
       const result = await callOrchestrator<{ runtime: unknown }>("/runtime/start", {
         user_id: userId,
         project_id: projectId,
         run_command: project.run_command ?? "",
+        language: row.language ?? "node",
+        env,
+        bundle_url: bundleUrl,
+        bundle_sha256: bundleSha256,
         source_url: signed.signedUrl,
         source_sha256: project.upload_sha256 ?? "",
         plan: {

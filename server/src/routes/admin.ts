@@ -476,6 +476,84 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
+  // User feedback inbox. Sender emails resolve at read time from users (never
+  // stored on the row). Unread first; read entries hide unless show_read=1.
+  // Read-state filtering happens in code, not SQL: boolean binding differs
+  // between SQLite (0/1) and Postgres (true/false), and the table is tiny.
+  app.get("/admin/feedback", async (req, reply) => {
+    const showRead = (req.query as { show_read?: string }).show_read === "1";
+    try {
+      const { data, error } = await supabase
+        .from("feedback")
+        .select("id, user_id, message, is_read, created_at")
+        .order("created_at", { ascending: false })
+        .limit(200);
+      if (error) {
+        logger.warn({ err: error }, "Feedback table unreadable; returning empty inbox");
+        return reply.send({ entries: [], unread: 0, pending_migration: true });
+      }
+      const all = ((data ?? []) as {
+        id: string;
+        user_id: string;
+        message: string;
+        is_read: boolean | number | null;
+        created_at: string;
+      }[]).map((r) => ({ ...r, is_read: r.is_read === true || r.is_read === 1 }));
+      const rows = showRead ? all : all.filter((r) => !r.is_read);
+
+      const ownerIds = [...new Set(rows.map((r) => r.user_id).filter(Boolean))];
+      let emails: Record<string, string> = {};
+      if (ownerIds.length > 0) {
+        const { data: users } = await supabase.from("users").select("id, email").in("id", ownerIds);
+        emails = Object.fromEntries(
+          ((users ?? []) as { id: string; email: string }[]).map((u) => [u.id, u.email])
+        );
+      }
+
+      // No count aggregate on the local stand-in: feedback volume is tiny, so
+      // unread is counted from the same rows instead of a second query.
+      return reply.send({
+        entries: rows.map((r) => ({
+          ...r,
+          sender_email: emails[r.user_id] ?? null,
+        })),
+        unread: all.filter((r) => !r.is_read).length,
+        pending_migration: false,
+      });
+    } catch (err) {
+      logger.warn({ err }, "Feedback table unreadable; returning empty inbox");
+      return reply.send({ entries: [], unread: 0, pending_migration: true });
+    }
+  });
+
+  // Marking read hides the entry (show_read=1 reveals it again); unmarking
+  // reopens it. No delete: history stays for disputes and follow-ups.
+  app.patch("/admin/feedback/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const parsed = z
+      .object({ is_read: z.boolean() })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: { code: "VALIDATION_ERROR", message: "is_read is required" },
+      });
+    }
+
+    const { error } = await supabase
+      .from("feedback")
+      .update({ is_read: parsed.data.is_read })
+      .eq("id", id);
+
+    if (error) {
+      return reply.status(500).send({
+        error: { code: "INTERNAL_ERROR", message: "Could not update feedback" },
+      });
+    }
+
+    logger.info({ admin: req.auth!.userId, feedbackId: id, is_read: parsed.data.is_read }, "Feedback marked");
+    return reply.send({ success: true });
+  });
+
   app.patch("/admin/users/:id/plan", async (req, reply) => {
     const { id } = req.params as { id: string };
     const parsed = planChangeSchema.safeParse(req.body ?? {});

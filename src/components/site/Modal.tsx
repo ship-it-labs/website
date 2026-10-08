@@ -43,7 +43,7 @@ export function Modal({
         className={`glass w-full ${width} my-auto rounded-2xl`}
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="flex items-start justify-between gap-4 border-b border-white/[0.07] px-6 py-5">
+        <header className="flex items-start justify-between gap-4 border-b border-white/[0.07] px-4 py-4 sm:px-6 sm:py-5">
           <div className="min-w-0">
             <h2 className="truncate text-[15px] font-semibold text-white">{title}</h2>
             {description && (
@@ -68,7 +68,7 @@ export function Modal({
             </svg>
           </button>
         </header>
-        <div className="p-6">{children}</div>
+        <div className="p-4 sm:p-6">{children}</div>
       </div>
     </div>
   );

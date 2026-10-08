@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api, setAccessToken } from "@/lib/api";
+import { usePageTitle } from "@/lib/page-title";
+import { CopyButton } from "@/components/site/CopyButton";
 import { timeAgo } from "@/lib/time";
 import { useAuth } from "@/lib/auth-context";
 import {
@@ -41,6 +43,7 @@ function expiryLabel(expiresAt: string | null, isActive: boolean): string {
 }
 
 export function ApiKeysPage() {
+  usePageTitle("API keys");
   const navigate = useNavigate();
   const { signOut } = useAuth();
   const [keys, setKeys] = useState<ApiKeyRecord[]>([]);
@@ -166,6 +169,7 @@ export function ApiKeysPage() {
               onChange={(event) => setKeyName(event.target.value)}
               placeholder="e.g. laptop plugin"
               maxLength={64}
+              autoComplete="off"
               className="w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none"
             />
           </label>
@@ -213,13 +217,10 @@ export function ApiKeysPage() {
                 It will never be shown again.
               </p>
             </div>
-            <button
-              type="button"
-              onClick={() => navigator.clipboard?.writeText(revealed)}
-              className="rounded-lg border border-violet-400/40 px-3 py-1.5 text-xs text-violet-200 transition-colors hover:bg-violet-500/20"
-            >
-              Copy
-            </button>
+            <CopyButton
+              text={revealed}
+              label="Copy"
+            />
           </div>
           <code className="mt-4 block break-all rounded-lg border border-violet-400/25 bg-zinc-950/60 p-4 font-mono text-xs text-violet-100">
             {revealed}
