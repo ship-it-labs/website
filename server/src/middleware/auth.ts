@@ -2,7 +2,7 @@ import { FastifyRequest, FastifyReply } from "fastify";
 import { supabase } from "../db/index.js";
 import { hashApiKey } from "../utils/api-key.js";
 import { hasSessionRow } from "../services/sessions.js";
-import { ensureDefaultPlan } from "../services/plan-service.js";
+import { ensureDefaultPlan, defaultPlan } from "../services/plan-service.js";
 import type { Plan, AuthenticatedRequest } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 
@@ -158,6 +158,21 @@ export async function authenticateApiKey(
     if (healed) {
       logger.info({ userId: user.id, planId: user.plan_id }, "Repaired missing plan row");
       plan = healed;
+    }
+  }
+
+  if (!plan) {
+    // Last resort: the row is missing AND unwritable (e.g. RLS still forced
+    // on plans because migration 0018 never ran). Known tiers fall back to
+    // their built-in definitions so one blocked table cannot lock every
+    // account out; unknown tiers still fail closed.
+    const fallback = defaultPlan(user.plan_id);
+    if (fallback) {
+      logger.warn(
+        { userId: user.id, planId: user.plan_id },
+        "Authenticating with built-in tier definition; plans row is missing and unwritable"
+      );
+      plan = fallback;
     }
   }
 

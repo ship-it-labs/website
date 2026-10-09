@@ -195,7 +195,9 @@ export function interpretProbeError(error: { code?: string; message?: string } |
  * which has no row level security. Cleans up after itself in every outcome.
  */
 export async function probeSessionWrites(db: Database = supabase): Promise<void> {
-  const probeId = `probe_${randomUUID()}`;
+  // Bare UUID: the id column is uuid-typed, so any prefix makes the probe die
+  // with a syntax error instead of proving anything about write access.
+  const probeId = randomUUID();
   const { error } = await db.from("user_sessions").insert({
     id: probeId,
     user_id: `00000000-0000-0000-0000-${probeId.slice(-12)}`,

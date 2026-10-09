@@ -83,6 +83,18 @@ export async function getPlan(planId: string): Promise<Plan | null> {
 }
 
 /**
+ * The built-in tier definition, for when the database row is unreadable or
+ * missing and repairing it is impossible (e.g. writes blocked). Callers use
+ * this only as a last resort after ensureDefaultPlan fails, and log loudly
+ * when they do: quotas enforced from here are correct by construction (these
+ * are the values seeds write), but admin customizations cannot apply to a
+ * row that does not exist.
+ */
+export function defaultPlan(planId: string): Plan | null {
+  return DEFAULT_PLANS.find((plan) => plan.id === planId) ?? null;
+}
+
+/**
  * Repairs a dangling tier reference: if planId names a known default tier
  * with no row (unseeded plans table), the row is inserted and returned.
  * Unknown ids return null — only real tiers self-heal, never typos. Existing

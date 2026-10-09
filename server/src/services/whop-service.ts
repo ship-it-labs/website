@@ -191,7 +191,12 @@ export function isSameTierActiveSubscription(
 
 /** Reports which tiers are missing a Whop plan, so misconfiguration is visible. */
 export function unconfiguredPlans(): string[] {
-  return Object.keys(PLAN_ENV_NAME).filter((planId) => !whopPlanIdFor(planId));
+  // Plus was retired (merged into Ultra): it has no plan to sell and must not
+  // warn. The resolution maps above keep it only so ancient metadata still
+  // resolves instead of crashing.
+  return Object.keys(PLAN_ENV_NAME).filter(
+    (planId) => planId !== "plus" && !whopPlanIdFor(planId)
+  );
 }
 
 /**
