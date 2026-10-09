@@ -1,5 +1,6 @@
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { SqliteClient } from "./sqlite/client.js";
+import { assertServiceRoleKey } from "./supabase-key.js";
 import { publicBaseUrl, internalBaseUrl } from "../config/urls.js";
 import { logger } from "../utils/logger.js";
 
@@ -18,6 +19,10 @@ if (isProduction && (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY)) {
   throw new Error(
     "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required when NODE_ENV=production."
   );
+}
+
+if (isProduction) {
+  assertServiceRoleKey(SUPABASE_SERVICE_ROLE_KEY);
 }
 
 export const usingSqlite = !isProduction;
