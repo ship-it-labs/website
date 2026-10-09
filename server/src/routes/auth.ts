@@ -55,6 +55,19 @@ async function shouldStartAsAdmin(email: string): Promise<boolean> {
 }
 
 /**
+ * True when a write failed because the row already exists, on either driver.
+ * Postgres reports code 23505; SQLite reports no code, just a "UNIQUE
+ * constraint failed" message. Local to this file because the shared copy
+ * lives in the billing service, and auth must not import the Whop SDK chain.
+ */
+function isDuplicateKeyError(error: { code?: string; message?: string } | null | undefined): boolean {
+  if (!error) return false;
+  if (error.code === "23505") return true;
+  const message = error.message ?? "";
+  return /unique constraint failed/i.test(message) || /duplicate key value/i.test(message);
+}
+
+/**
  * One-minute sliding-window brake. True when the caller is over the limit, in
  * which case the 429 is already sent and the handler returns. Limits live
  * next to each route so a reader sees the budget where it is spent.
@@ -180,16 +193,23 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {  app.pos
       });
     }
 
-    // Remembered for the settings device list and revocation. Best-effort:
-    // a recording failure must never fail the signup it belongs to.
+    // Remembered for the settings device list and revocation. A session that
+    // was not recorded can never validate, so a recording failure fails the
+    // signup loudly instead of handing back a token that 401s on next use.
     if (session?.access_token) {
       const agent = req.headers["user-agent"];
-      await recordSession({
+      const recorded = await recordSession({
         userId,
         token: session.access_token,
         userAgent: Array.isArray(agent) ? (agent[0] ?? "") : (agent ?? ""),
         ip: req.ip ?? "",
       });
+
+      if (!recorded) {
+        return reply.status(500).send({
+          error: { code: "SESSION_NOT_RECORDED", message: "Could not establish a session. Try signing in again." },
+        });
+      }
     }
 
     return reply.status(201).send({
@@ -235,14 +255,42 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {  app.pos
       });
     }
 
+    // Self-heal the application row: the auth account provably exists
+    // (credentials just verified), but the users row may be missing on
+    // databases predating it. Insert-only — an existing row, plan included,
+    // is never touched. Without this, recordSession below fails its foreign
+    // key and the login succeeds into a session that 401s on next use.
+    if (!user) {
+      const { error: healError } = await supabase.from("users").insert({
+        id: credentials.data.user.id,
+        email: normalizedEmail,
+        plan_id: "free",
+      });
+      if (healError && !isDuplicateKeyError(healError)) {
+        logger.error({ err: healError, userId: credentials.data.user.id }, "Login self-heal failed");
+        return reply.status(500).send({
+          error: { code: "INTERNAL_ERROR", message: "Could not establish the account. Try again." },
+        });
+      }
+    }
+
     if (session?.access_token) {
       const agent = req.headers["user-agent"];
-      await recordSession({
+      const recorded = await recordSession({
         userId: credentials.data.user.id,
         token: session.access_token,
         userAgent: Array.isArray(agent) ? (agent[0] ?? "") : (agent ?? ""),
         ip: req.ip ?? "",
       });
+
+      // A session that was not recorded can never validate. Failing here,
+      // loudly, instead of returning a token that 401s on the next request
+      // with SESSION_REVOKED and no trace of why.
+      if (!recorded) {
+        return reply.status(500).send({
+          error: { code: "SESSION_NOT_RECORDED", message: "Could not establish a session. Try signing in again." },
+        });
+      }
     }
 
     return reply.send({

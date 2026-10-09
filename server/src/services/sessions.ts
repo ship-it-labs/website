@@ -26,17 +26,27 @@ export async function recordSession(
     ip?: string;
   },
   db: Database = supabase
-): Promise<void> {
+): Promise<boolean> {
   try {
-    await db.from("user_sessions").insert({
+    const { error } = await db.from("user_sessions").insert({
       id: randomUUID(),
       user_id: options.userId,
       token_hash: hashSessionToken(options.token),
       user_agent: (options.userAgent ?? "").slice(0, 256) || null,
       ip: (options.ip ?? "").slice(0, 64) || null,
     });
+    if (error) {
+      // Logged AND reported: the caller turns this into a loud login failure.
+      // A session that is not recorded can never validate, so swallowing this
+      // produced logins that 401d on the very next request with
+      // SESSION_REVOKED and no trace of why.
+      logger.warn({ err: error, userId: options.userId }, "Failed to record login session");
+      return false;
+    }
+    return true;
   } catch (err) {
     logger.warn({ err, userId: options.userId }, "Failed to record login session");
+    return false;
   }
 }
 

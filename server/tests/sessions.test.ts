@@ -65,6 +65,23 @@ describe("session lifecycle", () => {
     expect(await hasSessionRow("u1", "tok-1", client)).toBe(true);
   });
 
+  it("reports whether the recording landed", async () => {
+    await addUser("u1");
+    await expect(
+      recordSession({ userId: "u1", token: "tok-1" }, client)
+    ).resolves.toBe(true);
+  });
+
+  it("reports failure instead of a fake success", async () => {
+    // No user row: the insert fails its foreign key, exactly the production
+    // shape where a login used to succeed into a session that 401d on next
+    // use. The caller must see false and fail loudly.
+    await expect(
+      recordSession({ userId: "ghost", token: "tok-1" }, client)
+    ).resolves.toBe(false);
+    expect(await hasSessionRow("ghost", "tok-1", client)).toBe(false);
+  });
+
   it("rejects an unknown token", async () => {
     await addUser("u1");
 
