@@ -2,6 +2,7 @@ import { FastifyRequest, FastifyReply } from "fastify";
 import { supabase } from "../db/index.js";
 import { hashApiKey } from "../utils/api-key.js";
 import { hasSessionRow } from "../services/sessions.js";
+import { ensureDefaultPlan } from "../services/plan-service.js";
 import type { Plan, AuthenticatedRequest } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 
@@ -142,13 +143,25 @@ export async function authenticateApiKey(
     return;
   }
 
-  const { data: plan, error: planError } = await supabase
+  const { data: planRow, error: planError } = await supabase
     .from("plans")
     .select("*")
     .eq("id", user.plan_id)
     .single();
 
+  let plan = planRow as Plan | null;
   if (planError || !plan) {
+    // The tier row may simply never have been seeded (empty plans table).
+    // Known default tiers repair themselves once; anything else stays a loud
+    // denial rather than a silent wrong-tier grant.
+    const healed = await ensureDefaultPlan(user.plan_id);
+    if (healed) {
+      logger.info({ userId: user.id, planId: user.plan_id }, "Repaired missing plan row");
+      plan = healed;
+    }
+  }
+
+  if (!plan) {
     // Names the dangling tier instead of a bare 401: the usual causes are an
     // unseeded plans table (run PROD_SETUP.sql or reboot so seedPlans fills
     // it) or a retired tier id (e.g. plus without migration 0008).

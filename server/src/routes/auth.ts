@@ -2,6 +2,7 @@ import { FastifyInstance, FastifyReply } from "fastify";
 import { supabase, usingSqlite } from "../db/index.js";
 import { generateApiKey } from "../utils/api-key.js";
 import { isCommonPassword } from "../utils/passwords.js";
+import { isDuplicateKeyError } from "../utils/db-errors.js";
 import { seedPlans } from "../services/plan-service.js";
 import { BOOTSTRAP_ADMIN_EMAIL } from "../services/admin.js";
 import { recordSession, hashSessionToken } from "../services/sessions.js";
@@ -52,19 +53,6 @@ async function shouldStartAsAdmin(email: string): Promise<boolean> {
     logger.warn({ err }, "Admin first-user check failed during signup");
     return false;
   }
-}
-
-/**
- * True when a write failed because the row already exists, on either driver.
- * Postgres reports code 23505; SQLite reports no code, just a "UNIQUE
- * constraint failed" message. Local to this file because the shared copy
- * lives in the billing service, and auth must not import the Whop SDK chain.
- */
-function isDuplicateKeyError(error: { code?: string; message?: string } | null | undefined): boolean {
-  if (!error) return false;
-  if (error.code === "23505") return true;
-  const message = error.message ?? "";
-  return /unique constraint failed/i.test(message) || /duplicate key value/i.test(message);
 }
 
 /**

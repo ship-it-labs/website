@@ -1,5 +1,6 @@
-import { supabase } from "../db/index.js";
+import { supabase, type Database } from "../db/index.js";
 import { Plan } from "../types/index.js";
+import { isDuplicateKeyError } from "../utils/db-errors.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -78,6 +79,36 @@ export async function getPlan(planId: string): Promise<Plan | null> {
     .eq("id", planId)
     .single();
   if (error) return null;
+  return data as Plan;
+}
+
+/**
+ * Repairs a dangling tier reference: if planId names a known default tier
+ * with no row (unseeded plans table), the row is inserted and returned.
+ * Unknown ids return null — only real tiers self-heal, never typos. Existing
+ * rows, including admin-edited pricing, are never touched.
+ */
+export async function ensureDefaultPlan(
+  planId: string,
+  db: Database = supabase
+): Promise<Plan | null> {
+  const template = DEFAULT_PLANS.find((plan) => plan.id === planId);
+  if (!template) return null;
+
+  const { error } = await db
+    .from("plans")
+    .insert({ ...template } as Record<string, unknown>);
+  if (error && !isDuplicateKeyError(error)) {
+    logger.error({ err: error, planId }, "Failed to repair missing plan row");
+    return null;
+  }
+
+  const { data, error: readError } = await db
+    .from("plans")
+    .select("*")
+    .eq("id", planId)
+    .single();
+  if (readError || !data) return null;
   return data as Plan;
 }
 

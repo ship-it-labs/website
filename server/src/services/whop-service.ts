@@ -2,6 +2,10 @@ import { WhopClient, WhopEnvironment } from "@whop/sdk";
 import crypto from "node:crypto";
 import { logger } from "../utils/logger.js";
 import { supabase } from "../db/index.js";
+import { isDuplicateKeyError } from "../utils/db-errors.js";
+
+// Re-exported so existing imports keep working.
+export { isDuplicateKeyError };
 
 const isProduction = process.env.NODE_ENV === "production";
 
@@ -428,18 +432,9 @@ const PLAN_FOR_STATUS: Record<string, string | null> = {
 };
 
 /**
- * True when a write failed because the row already exists, on either driver.
- * Postgres reports code 23505; SQLite reports no code at all, just a
- * "UNIQUE constraint failed" message. Checking only 23505 meant every Whop
- * retry on SQLite fell into the error branch, 500'd, and triggered another
- * retry — an infinite storm of duplicates that were never duplicates.
+ * Duplicate-key detection lives in utils/db-errors so every driver check
+ * stays identical (see the re-export at the top of this file).
  */
-export function isDuplicateKeyError(error: { code?: string; message?: string } | null | undefined): boolean {
-  if (!error) return false;
-  if (error.code === "23505") return true;
-  const message = error.message ?? "";
-  return /unique constraint failed/i.test(message) || /duplicate key value/i.test(message);
-}
 
 /**
  * Maps a Whop membership onto a local plan id. The plan id travels in the
