@@ -1,5 +1,6 @@
-import { supabase } from "../db/index.js";
+import { supabase, type Database } from "../db/index.js";
 import { callOrchestrator } from "./orchestrator-client.js";
+import { isBuildOverdue } from "./build-service.js";
 import { logger } from "../utils/logger.js";
 import type { Build } from "../types/index.js";
 
@@ -116,7 +117,7 @@ async function markFailed(buildId: string, message: string): Promise<void> {
     .update({ status: "failure", completed_at: new Date().toISOString() })
     .eq("id", buildId);
 
-  await appendLog(buildId, "stderr", message);
+  await appendLog(supabase, buildId, "stderr", message);
 }
 
 /**
@@ -125,11 +126,11 @@ async function markFailed(buildId: string, message: string): Promise<void> {
  * Log rows are replaced rather than appended so a poller that runs twice cannot
  * duplicate the output.
  */
-async function appendLog(buildId: string, stream: "stdout" | "stderr", content: string): Promise<void> {
+async function appendLog(db: Database, buildId: string, stream: "stdout" | "stderr", content: string): Promise<void> {
   if (!content.trim()) return;
 
-  await supabase.from("build_logs").delete().eq("build_id", buildId);
-  await supabase.from("build_logs").insert({
+  await db.from("build_logs").delete().eq("build_id", buildId);
+  await db.from("build_logs").insert({
     build_id: buildId,
     stream,
     content,
@@ -143,22 +144,52 @@ async function appendLog(buildId: string, stream: "stdout" | "stderr", content: 
  * dashboard with no explanation and the caller has nothing to act on. Anything
  * still running past BUILD_STALE_MS is failed with that explanation.
  */
-export async function pollRuntimeBuilds(): Promise<void> {
-  const { data: builds, error } = await supabase
+export async function pollRuntimeBuilds(db: Database = supabase): Promise<void> {
+  const { data: builds, error } = await db
     .from("builds")
-    .select("id, status, started_at, created_at")
+    .select("id, status, started_at, created_at, timeout_seconds, executor")
     .in("status", ["running", "pending"]);
 
   if (error || !builds || builds.length === 0) return;
 
   for (const build of builds) {
     const startedAt = new Date(build.started_at ?? build.created_at ?? Date.now()).getTime();
+
+    // A build running past its own timeout is over whether or not anyone
+    // reported back. This is the backstop for GitHub-executor builds, whose
+    // only outcome channel is the workflow's Report step: if that step was
+    // skipped (missing BUILD_REPORT_TOKEN or PLATFORM_API_URL) or its POST
+    // failed, nothing else would ever move the row, and the dashboard would
+    // say "running" forever for a build that finished an hour ago.
+    if (
+      isBuildOverdue({
+        started_at: build.started_at ?? null,
+        timeout_seconds: (build as { timeout_seconds?: number | null }).timeout_seconds ?? null,
+      })
+    ) {
+      await db
+        .from("builds")
+        .update({ status: "timeout", completed_at: new Date().toISOString() })
+        .eq("id", build.id);
+      await appendLog(
+        db,
+        build.id,
+        "stderr",
+        "This build ran past its timeout with no result reported. If it finished " +
+          "on GitHub, the workflow's Report step did not reach the control plane — " +
+          "check that BUILD_REPORT_TOKEN and PLATFORM_API_URL are set on the repo " +
+          "and that the report POST succeeded."
+      );
+      continue;
+    }
+
     if (Date.now() - startedAt > BUILD_STALE_MS) {
-      await supabase
+      await db
         .from("builds")
         .update({ status: "failure", completed_at: new Date().toISOString() })
         .eq("id", build.id);
       await appendLog(
+        db,
         build.id,
         "stderr",
         "This build stopped reporting and was marked failed. The agent running it may have restarted."
@@ -173,7 +204,7 @@ export async function pollRuntimeBuilds(): Promise<void> {
 
       if (result.status === "running") continue;
 
-      await supabase
+      await db
         .from("builds")
         .update({
           status: result.status,
@@ -182,7 +213,7 @@ export async function pollRuntimeBuilds(): Promise<void> {
         })
         .eq("id", build.id);
 
-      await appendLog(build.id, result.status === "success" ? "stdout" : "stderr", result.logs || result.error || "");
+      await appendLog(db, build.id, result.status === "success" ? "stdout" : "stderr", result.logs || result.error || "");
     } catch (err) {
       // The build may not have reached an agent yet, or the orchestrator may be
       // briefly unavailable. Neither is worth failing the build over; the stale
