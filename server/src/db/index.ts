@@ -24,17 +24,18 @@ if (isProduction && (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY)) {
 /**
  * Validates the Supabase configuration at boot, not at import: tests flip
  * NODE_ENV per case and must be able to load this module with placeholder
- * values. The role check lives here (rather than inline) for the same reason —
- * index.ts calls it once on the real production values.
+ * values. Returns the key's role claim so the boot log proves which key the
+ * live deployment actually runs with.
  */
-export function assertSupabaseConfig(): void {
-  if (!isProduction) return;
+export function assertSupabaseConfig(): string {
+  if (!isProduction) return "sqlite";
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
     throw new Error(
       "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required when NODE_ENV=production."
     );
   }
   assertServiceRoleKey(SUPABASE_SERVICE_ROLE_KEY);
+  return "service_role";
 }
 
 export const usingSqlite = !isProduction;

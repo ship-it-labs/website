@@ -226,8 +226,12 @@ seedPlans().catch((err) => logger.error({ err }, "Failed to seed plans"));
 // Validates the database configuration on the real boot values before
 // serving: a wrong Supabase key boots fine and then fails every write with
 // row level security errors, which once broke every login with no trace.
+// The role is logged so Render logs prove which key the live instance runs.
 import { assertSupabaseConfig } from "./db/index.js";
-assertSupabaseConfig();
+logger.info(
+  { supabaseKeyRole: assertSupabaseConfig() },
+  "Supabase configuration verified"
+);
 
 // Proves login sessions can actually be recorded before serving traffic. A
 // deployment whose session writes are blocked (forced RLS, wrong key) would
