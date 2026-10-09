@@ -149,7 +149,11 @@ export async function authenticateApiKey(
     .single();
 
   if (planError || !plan) {
-    reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "Plan not found" } });
+    // Names the dangling tier instead of a bare 401: the usual causes are an
+    // unseeded plans table (run PROD_SETUP.sql or reboot so seedPlans fills
+    // it) or a retired tier id (e.g. plus without migration 0008).
+    logger.warn({ userId: user.id, planId: user.plan_id }, "Plan row missing for account tier");
+    reply.status(401).send({ error: { code: "UNAUTHORIZED", message: `Plan not found: ${user.plan_id}` } });
     return;
   }
 
