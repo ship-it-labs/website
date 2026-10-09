@@ -519,3 +519,34 @@ create table if not exists public.feedback (
 create index if not exists idx_feedback_unread
   on public.feedback(is_read, created_at desc);
 ;
+-- ============================================================================
+-- migrations/0017_user_sessions_columns.sql
+-- ============================================================================
+-- Repair path for user_sessions. `create table if not exists` cannot fix a
+-- table that exists but is missing columns, and every login writes here.
+create table if not exists public.user_sessions (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid references public.users(id) on delete cascade,
+  token_hash text,
+  user_agent text,
+  ip text,
+  created_at timestamptz not null default now(),
+  last_seen_at timestamptz not null default now()
+);
+
+alter table public.user_sessions
+  add column if not exists user_id uuid references public.users(id) on delete cascade;
+alter table public.user_sessions
+  add column if not exists token_hash text;
+alter table public.user_sessions
+  add column if not exists user_agent text;
+alter table public.user_sessions
+  add column if not exists ip text;
+alter table public.user_sessions
+  add column if not exists created_at timestamptz not null default now();
+alter table public.user_sessions
+  add column if not exists last_seen_at timestamptz not null default now();
+
+create index if not exists idx_user_sessions_user on public.user_sessions(user_id);
+create index if not exists idx_user_sessions_token on public.user_sessions(token_hash, user_id);
+;
