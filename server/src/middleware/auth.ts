@@ -79,7 +79,11 @@ export async function authenticateApiKey(
     return;
   }
 
-  const token = authHeader.slice(7);
+  const token = authHeader.slice(7).trim();
+  if (!token) {
+    reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "Missing credentials" } });
+    return;
+  }
   const resolved = await resolveUserId(token);
 
   if (!resolved) {

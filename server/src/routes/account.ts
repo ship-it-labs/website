@@ -48,7 +48,7 @@ function requestMeta(req: FastifyRequest): { userAgent: string; ip: string } {  
 
 function bearerToken(req: FastifyRequest): string {
   const header = req.headers.authorization;
-  return header?.startsWith("Bearer ") ? header.slice(7) : "";
+  return header?.startsWith("Bearer ") ? header.slice(7).trim() : "";
 }
 
 /**

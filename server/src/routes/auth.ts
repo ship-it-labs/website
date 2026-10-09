@@ -257,7 +257,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {  app.pos
     // session is what actually ends the browser's access.
     const header = req.headers.authorization;
     if (header?.startsWith("Bearer ")) {
-      const token = header.slice(7);
+      const token = header.slice(7).trim();
       try {
         const { data } = await supabase
           .from("user_sessions")
