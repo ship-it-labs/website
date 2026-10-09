@@ -9,6 +9,7 @@ import {
   hasSessionRow,
   revokeSessionRow,
   revokeAllSessions,
+  interpretProbeError,
 } from "../src/services/sessions.js";
 
 /**
@@ -136,5 +137,29 @@ describe("session lifecycle", () => {
 
     expect(await hasSessionRow("u1", "tok-keep", client)).toBe(true);
     expect(await hasSessionRow("u1", "tok-drop", client)).toBe(false);
+  });
+});
+
+describe("session write probe verdicts", () => {
+  it("treats RLS rejection as fatal", () => {
+    const verdict = interpretProbeError({ code: "42501", message: "new row violates row-level security policy" });
+    expect(verdict.status).toBe("fatal");
+    expect((verdict as { message: string }).message).toMatch(/row level security/i);
+  });
+
+  it("treats foreign-key rejection as healthy", () => {
+    // The probe user cannot exist, so the FK correctly refusing proves writes
+    // reach the table — the opposite of a failure.
+    expect(interpretProbeError({ code: "23503", message: "violates foreign key" }).status).toBe("ok");
+  });
+
+  it("treats a missing table as a warning, not a boot failure", () => {
+    const verdict = interpretProbeError({ code: "42P01", message: 'relation "user_sessions" does not exist' });
+    expect(verdict.status).toBe("warn");
+  });
+
+  it("treats unexpected errors as warnings", () => {
+    expect(interpretProbeError({ code: "XX000", message: "boom" }).status).toBe("warn");
+    expect(interpretProbeError(null).status).toBe("ok");
   });
 });

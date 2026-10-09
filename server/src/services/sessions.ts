@@ -141,3 +141,81 @@ export async function revokeAllSessions(
     logger.warn({ err, userId }, "Failed to revoke sessions");
   }
 }
+
+export type SessionWriteProbe =
+  | { status: "ok" }
+  | { status: "fatal"; message: string }
+  | { status: "warn"; message: string };
+
+/**
+ * Interprets a session-write probe insert. The probe inserts a row for a
+ * user id that cannot exist, so the informative outcomes are all failures:
+ * a foreign-key rejection proves writes reach the table (healthy), an RLS
+ * rejection proves writes are blocked (fatal, boot must fail), and anything
+ * else is logged without blocking boot. Pure for testability; probeSessionWrites
+ * below performs the insert.
+ */
+export function interpretProbeError(error: { code?: string; message?: string } | null | undefined): SessionWriteProbe {
+  if (!error) {
+    // Unexpected success: the table accepted a dangling row (no FK?). The
+    // caller deletes it; writes demonstrably work either way.
+    return { status: "ok" };
+  }
+  if (error.code === "42501" || /row-level security/i.test(error.message ?? "")) {
+    return {
+      status: "fatal",
+      message:
+        "user_sessions writes are blocked by row level security (42501). " +
+        "Either SUPABASE_SERVICE_ROLE_KEY is not the service_role key, or RLS " +
+        "is FORCED on the table (run migration 0018). Logins cannot work until fixed.",
+    };
+  }
+  if (error.code === "23503" || /foreign key/i.test(error.message ?? "")) {
+    // Expected: the fake user does not exist, so the FK correctly refused.
+    // Writes reach the table, which is all the probe needs to know.
+    return { status: "ok" };
+  }
+  if (error.code === "42P01" || /relation .* does not exist|Could not find the table/i.test(error.message ?? "")) {
+    return {
+      status: "warn",
+      message:
+        "user_sessions table is missing; logins will fail open (revocation unchecked) until migration 0009/0017 runs.",
+    };
+  }
+  return {
+    status: "warn",
+    message: `session write probe failed unexpectedly: ${error.code ?? "unknown"} ${error.message ?? ""}`,
+  };
+}
+
+/**
+ * Verifies at boot that login sessions can actually be recorded. Throws on a
+ * fatal misconfiguration (RLS blocking writes) so the deployment fails
+ * loudly instead of serving logins that 401 on next use. Skipped on SQLite,
+ * which has no row level security. Cleans up after itself in every outcome.
+ */
+export async function probeSessionWrites(db: Database = supabase): Promise<void> {
+  const probeId = `probe_${randomUUID()}`;
+  const { error } = await db.from("user_sessions").insert({
+    id: probeId,
+    user_id: `00000000-0000-0000-0000-${probeId.slice(-12)}`,
+    token_hash: "probe",
+  });
+
+  const verdict = interpretProbeError(
+    error as { code?: string; message?: string } | null | undefined
+  );
+
+  if (!error) {
+    await db.from("user_sessions").delete().eq("id", probeId);
+  }
+
+  if (verdict.status === "fatal") {
+    throw new Error(verdict.message);
+  }
+  if (verdict.status === "warn") {
+    logger.warn({ message: verdict.message }, "Session write probe degraded");
+  } else {
+    logger.info("Session write probe passed; login sessions are recordable");
+  }
+}

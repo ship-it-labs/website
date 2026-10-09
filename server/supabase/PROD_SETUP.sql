@@ -550,3 +550,42 @@ alter table public.user_sessions
 create index if not exists idx_user_sessions_user on public.user_sessions(user_id);
 create index if not exists idx_user_sessions_token on public.user_sessions(token_hash, user_id);
 ;
+-- ============================================================================
+-- migrations/0018_no_force_rls.sql
+-- ============================================================================
+-- The control plane uses the service-role key, which bypasses row level
+-- security — unless RLS is FORCED on a table, which blocks even service-role.
+-- Lifts FORCE on every table the server writes; does not disable RLS itself.
+DO $$
+DECLARE t text;
+BEGIN
+  FOREACH t IN ARRAY ARRAY[
+    'public.users',
+    'public.plans',
+    'public.api_keys',
+    'public.subscriptions',
+    'public.entitlements',
+    'public.projects',
+    'public.builds',
+    'public.build_logs',
+    'public.artifacts',
+    'public.runtimes',
+    'public.runtime_sessions',
+    'public.usage_months',
+    'public.webhook_events',
+    'public.server_agents',
+    'public.platform_settings',
+    'public.user_sessions',
+    'public.user_preferences',
+    'public.env_overrides',
+    'public.admin_audit',
+    'public.feedback'
+  ] LOOP
+    BEGIN
+      EXECUTE format('ALTER TABLE %s NO FORCE ROW LEVEL SECURITY', t);
+    EXCEPTION WHEN undefined_table THEN
+      NULL;
+    END;
+  END LOOP;
+END $$;
+;

@@ -33,6 +33,7 @@ import { billingRoutes, webhookRoutes } from "./routes/billing.js";
 import { websocketRoutes } from "./websockets/index.js";
 import { startLeaseExpiryWorker } from "./services/usage-worker.js";
 import { seedPlans } from "./services/plan-service.js";
+import { probeSessionWrites } from "./services/sessions.js";
 import { loadEnvOverrides } from "./services/runtime-env.js";
 import { unconfiguredPlans } from "./services/whop-service.js";
 import { requestIdHook, errorEnvelope } from "./middleware/request-id.js";
@@ -221,6 +222,25 @@ if (fs.existsSync(FRONTEND_DIST)) {
 }
 
 seedPlans().catch((err) => logger.error({ err }, "Failed to seed plans"));
+
+// Validates the database configuration on the real boot values before
+// serving: a wrong Supabase key boots fine and then fails every write with
+// row level security errors, which once broke every login with no trace.
+import { assertSupabaseConfig } from "./db/index.js";
+assertSupabaseConfig();
+
+// Proves login sessions can actually be recorded before serving traffic. A
+// deployment whose session writes are blocked (forced RLS, wrong key) would
+// otherwise hand out tokens that 401 on next use; failing here names the
+// cause at boot instead. Skipped on SQLite, which has no row level security.
+if (!usingSqlite) {
+  try {
+    await probeSessionWrites();
+  } catch (err) {
+    logger.error({ err }, "Session write probe failed; refusing to boot with broken logins");
+    process.exit(1);
+  }
+}
 
 // DB-managed configuration lands in process.env before anything serves, so the
 // first request already sees admin-set values. Refreshes every minute after
