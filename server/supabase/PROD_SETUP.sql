@@ -520,6 +520,14 @@ create index if not exists idx_feedback_unread
   on public.feedback(is_read, created_at desc);
 ;
 -- ============================================================================
+-- migrations/0020_feedback_anonymous.sql
+-- ============================================================================
+-- Anonymous feedback: the homepage button must work for logged-out visitors,
+-- so user_id becomes nullable. Authenticated senders still attach their id.
+alter table public.feedback
+  alter column user_id drop not null;
+;
+-- ============================================================================
 -- migrations/0017_user_sessions_columns.sql
 -- ============================================================================
 -- Repair path for user_sessions. `create table if not exists` cannot fix a
@@ -588,4 +596,21 @@ BEGIN
     END;
   END LOOP;
 END $$;
+;
+-- ============================================================================
+-- migrations/0019_oauth_codes.sql
+-- ============================================================================
+-- OAuth authorization codes for the first-party OpenCode plugin. Short-lived
+-- (10 minutes) and single-use; only the hash is stored.
+create table if not exists public.oauth_codes (
+  id text primary key,
+  user_id uuid not null references public.users(id) on delete cascade,
+  client_id text not null,
+  redirect_uri text not null,
+  code_challenge text not null,
+  expires_at timestamptz not null,
+  created_at timestamptz not null default now()
+);
+
+create index if not exists idx_oauth_codes_user on public.oauth_codes(user_id);
 ;

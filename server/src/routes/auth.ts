@@ -163,6 +163,10 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {  app.pos
       });
     }
 
+    // RETIRED (OAuth only): signup no longer mints a manual API key — access
+    // comes from the OAuth authorize flow, which mints its own token.
+    // Preserved below so the flow can be restored.
+    /*
     const { key, hash, prefix } = generateApiKey();
     const keyId = `key_${userId.slice(0, 8)}_${Date.now().toString(36)}`;
     const { error: keyError } = await supabase.from("api_keys").insert({
@@ -180,6 +184,7 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {  app.pos
         error: { code: "INTERNAL_ERROR", message: "Could not create the account" },
       });
     }
+    */
 
     // Remembered for the settings device list and revocation. A session that
     // was not recorded can never validate, so a recording failure fails the
@@ -202,7 +207,8 @@ export async function authRoutes(app: FastifyInstance): Promise<void> {  app.pos
 
     return reply.status(201).send({
       user: { id: userId, email: normalizedEmail },
-      api_key: key,
+      // RETIRED (OAuth only): no manual key is minted at signup anymore.
+      api_key: null,
       session: session?.access_token ? { access_token: session.access_token } : null,
     });
   });

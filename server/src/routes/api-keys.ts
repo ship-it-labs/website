@@ -71,7 +71,15 @@ export function expiryToTimestamp(
 export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authenticateApiKey);
 
+  // RETIRED (OAuth only): manual key listing retired with the API-keys page.
+  // The original body is preserved below so the flow can be restored; the
+  // /account/grants endpoints are the supported replacement for revocation.
   app.get("/api-keys", async (req, reply) => {
+    void req;
+    return reply.status(410).send({
+      error: { code: "RETIRED", message: "Manual API keys are retired; connect with OAuth instead." },
+    });
+    /*
     const { data, error } = await supabase
       .from("api_keys")
       .select("id, key_prefix, name, is_active, created_at, last_used_at, expires_at")
@@ -83,9 +91,17 @@ export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return reply.send({ api_keys: data });
+    */
   });
 
+  // RETIRED (OAuth only): manual key creation retired; OAuth mints tokens.
+  // Preserved below for restoration.
   app.post("/api-keys", async (req, reply) => {
+    void req;
+    return reply.status(410).send({
+      error: { code: "RETIRED", message: "Manual API keys are retired; connect with OAuth instead." },
+    });
+    /*
     const parsed = createSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return reply.status(400).send({
@@ -127,9 +143,17 @@ export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
       name,
       expires_at: expiresAt,
     });
+    */
   });
 
+  // RETIRED (OAuth only): manual revocation retired; use Connected apps.
+  // Preserved below for restoration.
   app.post("/api-keys/:id/revoke", async (req, reply) => {
+    void req;
+    return reply.status(410).send({
+      error: { code: "RETIRED", message: "Manual API keys are retired; revoke from Connected apps instead." },
+    });
+    /*
     const { id } = req.params as { id: string };
 
     // Checked first so revoking a missing or already-deleted key 404s instead
@@ -162,9 +186,17 @@ export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
     // Saying so lets the UI sign out cleanly instead of failing its next load
     // with a bare 401 that looks like the revoke itself broke.
     return reply.send({ success: true, revoked_own_key: req.auth!.apiKeyId === id });
+    */
   });
 
+  // RETIRED (OAuth only): manual rotation retired; re-authorize instead.
+  // Preserved below for restoration.
   app.post("/api-keys/:id/rotate", async (req, reply) => {
+    void req;
+    return reply.status(410).send({
+      error: { code: "RETIRED", message: "Manual API keys are retired; re-authorize with OAuth instead." },
+    });
+    /*
     const { id } = req.params as { id: string };
 
     const { data: oldKey } = await supabase
@@ -199,5 +231,6 @@ export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
       key_prefix: prefix,
       rotated_own_key: req.auth!.apiKeyId === id,
     });
+    */
   });
 }

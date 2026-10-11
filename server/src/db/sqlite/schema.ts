@@ -278,12 +278,24 @@ create index if not exists idx_admin_audit_created on admin_audit(created_at);
 -- users; read entries hide by default but stay for history. See 0016.
 create table if not exists feedback (
   id text primary key,
-  user_id text not null references users(id) on delete cascade,
+  user_id text references users(id) on delete cascade,
   message text not null,
   is_read integer not null default 0,
   created_at text not null default (datetime('now'))
 );
 create index if not exists idx_feedback_unread on feedback(is_read, created_at desc);
+
+-- OAuth authorization codes: short-lived, single-use, hash-stored. See 0019.
+create table if not exists oauth_codes (
+  id text primary key,
+  user_id text not null references users(id) on delete cascade,
+  client_id text not null,
+  redirect_uri text not null,
+  code_challenge text not null,
+  expires_at text not null,
+  created_at text not null default (datetime('now'))
+);
+create index if not exists idx_oauth_codes_user on oauth_codes(user_id);
 
 -- Platform kill switches and overrides, edited from the admin panel. A missing
 -- row means the default: signups open, executor automatic.

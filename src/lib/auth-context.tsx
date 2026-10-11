@@ -19,7 +19,7 @@ interface AccountUser {
 interface AuthState {
   user: AccountUser | null;
   loading: boolean;
-  signUp: (email: string, password: string) => Promise<{ apiKey: string }>;
+  signUp: (email: string, password: string) => Promise<{ apiKey: string | null }>;
   signIn: (email: string, password: string) => Promise<void>;
   signOut: () => Promise<void>;
   resetPassword: (email: string) => Promise<void>;
@@ -29,7 +29,7 @@ const AuthContext = createContext<AuthState | null>(null);
 
 interface SignupResponse {
   user: AccountUser;
-  api_key: string;
+  api_key: string | null;
   session: { access_token?: string } | null;
 }
 

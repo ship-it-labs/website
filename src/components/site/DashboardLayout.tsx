@@ -9,7 +9,9 @@ import { cn } from "@/lib/utils";
 
 const TABS = [
   { to: "/dashboard", label: "Overview" },
-  { to: "/dashboard/keys", label: "API keys" },
+  // RETIRED (OAuth only): manual API keys retired; Connected apps in Settings
+  // is the replacement. Tab preserved in comments with the page itself.
+  // { to: "/dashboard/keys", label: "API keys" },
   { to: "/dashboard/billing", label: "Billing" },
   { to: "/dashboard/settings", label: "Settings" },
 ];

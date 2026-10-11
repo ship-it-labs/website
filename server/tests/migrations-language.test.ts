@@ -111,4 +111,19 @@ describe("feedback schema", () => {
     ).length;
     expect(unread).toBe(0);
   });
+
+  it("stores anonymous feedback with a null user", () => {
+    db.exec(SCHEMA_SQL);
+    db.prepare("insert into feedback (id, user_id, message) values (?, ?, ?)").run(
+      "f-anon",
+      null,
+      "Homepage hello"
+    );
+
+    const rows = db
+      .prepare("select message from feedback where user_id is null")
+      .all() as { message: string }[];
+    expect(rows).toHaveLength(1);
+    expect(rows[0].message).toBe("Homepage hello");
+  });
 });

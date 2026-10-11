@@ -51,6 +51,7 @@ export function SettingsPage() {
         <ProfileSection email={user?.email ?? ""} />
         <PasswordSection />
         <SessionsSection onSignedOut={() => navigate("/login")} signOut={signOut} />
+        <GrantsSection />
         <PreferencesSection />
       </div>
       <div className="mt-6">
@@ -326,6 +327,83 @@ function SessionsSection({
             Sign out everywhere, including this device
           </button>
         </>
+      )}
+    </Panel>
+  );
+}
+
+interface Grant {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+// Apps authorized through the OAuth page. Each grant is a token that acts as
+// this account; revoking deletes it immediately. This replaces the retired
+// manual API-keys page as the place to cut off integrations.
+function GrantsSection() {
+  const [grants, setGrants] = useState<Grant[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const result = await api.get<{ grants: Grant[] }>("/api/v1/account/grants");
+      setGrants(result.grants);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not load connected apps");
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  async function revoke(id: string) {
+    setBusy(id);
+    try {
+      await api.del(`/api/v1/account/grants/${id}`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not revoke access");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  return (
+    <Panel
+      title="Connected apps"
+      description="Integrations you authorized. Revoking cuts off access immediately."
+    >
+      <SectionError message={error} />
+      {grants.length === 0 ? (
+        <EmptyState>No apps connected. Authorize OpenCode to see it here.</EmptyState>
+      ) : (
+        <ul className="divide-y divide-white/[0.06]">
+          {grants.map((grant) => (
+            <li
+              key={grant.id}
+              className="flex items-center justify-between gap-4 py-3.5 first:pt-0 last:pb-0"
+            >
+              <div className="min-w-0">
+                <p className="truncate text-sm text-zinc-200">{grant.name}</p>
+                <p className="mt-1 text-xs text-zinc-600">
+                  connected {new Date(grant.created_at).toLocaleString()}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={busy === grant.id}
+                onClick={() => revoke(grant.id)}
+                className="shrink-0 rounded-lg border border-white/10 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:border-white/20 hover:text-white disabled:opacity-40"
+              >
+                {busy === grant.id ? "…" : "Revoke"}
+              </button>
+            </li>
+          ))}
+        </ul>
       )}
     </Panel>
   );

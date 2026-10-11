@@ -17,19 +17,17 @@ interface Section {
 
 const SECTIONS: Section[] = [
   {
-    id: "install",
-    title: "Install the plugin",
+    id: "connect",
+    title: "Connect OpenCode",
     body: [
-      "Install the published package and restart OpenCode. The plugin needs your account key, which you create in the dashboard under API keys.",
-      "Write the key to ~/.config/opencode/shipit.key. The plugin checks SHIPIT_API_KEY first and falls back to that file, because launchers do not always forward custom environment variables to plugins. The key is only shown in full once, at creation, so copy it then.",
+      "There are no API keys to copy. Run the login, approve in the browser that opens, and the access token is stored for you — then restart OpenCode so every tool picks it up.",
+      "The login starts a temporary server on your own machine, opens the Ship-It authorize page, and exchanges a one-time code for a token. Nothing secret ever passes through the chat. You can revoke access any time from Settings → Connected apps.",
+      "Headless or automated setups can set SHIPIT_API_KEY instead: use a token from a machine where you ran the login once. The plugin reads the environment first and the key file second, because launchers do not always forward custom environment variables to plugins.",
     ],
-    code: `{
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-shipit-runtime"]
-}`,
+    code: `npx opencode-shipit-runtime login`,
     extra: [
-      ["npm", "npm install -g opencode-shipit-runtime"],
-      ["key file", "echo \"ox_live_xxxxxxxx\" > ~/.config/opencode/shipit.key"],
+      ["config", `"plugin": ["opencode-shipit-runtime"]`],
+      ["headless", "SHIPIT_API_KEY=ox_live_xxxxxxxx"],
     ],
   },
   {
@@ -44,8 +42,8 @@ const SECTIONS: Section[] = [
     id: "run",
     title: "How a runtime works",
     body: [
-      "A successful build starts in an ephemeral Docker container with the whole sandbox filesystem to itself. The agent writes the artifact, the server-agent runs it.",
-      "Sessions are capped by your plan and by whatever remains of your monthly allowance. When the lease expires the container is destroyed along with its filesystem, so nothing outlives its session.",
+      "A successful build is packaged with its language toolchain into a self-contained bundle, and the sandbox runs that bundle — node, python, go, C++, Rust, Java, Ruby and Elixir are all supported. The agent writes nothing; the server-agent executes.",
+      "Sessions are capped by your plan and by whatever remains of your monthly allowance. When the lease expires the sandbox is destroyed along with its filesystem, so nothing outlives its session.",
     ],
   },
   {
@@ -60,12 +58,13 @@ const SECTIONS: Section[] = [
     id: "tools",
     title: "Tools the agent can use",
     body: [
-      "Every tool is authorised against your plan on the server. Groups are build.*, runtime.*, fs.*, network.*, artifact.* and usage.*.",
+      "Every tool is authorised against your plan on the server. Groups are build.*, runtime.*, fs.*, network.*, artifact.* and usage.*, plus shipit_login for connecting.",
     ],
   },
 ];
 
 const TOOL_GROUPS = [
+  { group: "auth", tools: ["shipit_login"] },
   { group: "project", tools: ["project_upload"] },
   { group: "build.*", tools: ["build_submit", "build_status", "build_logs", "build_list"] },
   {

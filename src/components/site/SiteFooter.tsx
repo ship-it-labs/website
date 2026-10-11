@@ -37,7 +37,8 @@ export function SiteFooter() {
             title="Account"
             links={[
               { label: "Create account", to: "/signup" },
-              { label: "API keys", to: "/dashboard/keys" },
+              // RETIRED (OAuth only): manual API keys retired.
+              // { label: "API keys", to: "/dashboard/keys" },
               { label: "Billing", to: "/dashboard/billing" },
               { label: "Contact support", to: "/contact" },
             ]}

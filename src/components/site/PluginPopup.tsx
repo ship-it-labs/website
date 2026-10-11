@@ -2,18 +2,20 @@ import { Link } from "react-router-dom";
 import { Modal } from "@/components/site/Modal";
 import { CopyButton } from "@/components/site/CopyButton";
 
-const INSTALL_COMMAND = "npm install -g opencode-shipit-runtime";
+const LOGIN_COMMAND = "npx opencode-shipit-runtime login";
 
 /**
  * First-signup connect walkthrough. Shown once on the welcome dashboard until
  * dismissed: without the plugin the account can do nothing, and new users
  * otherwise land on an empty dashboard with no idea what connects to what.
+ * Login is OAuth — no keys to copy. The token lands in the key file on its
+ * own; SHIPIT_API_KEY in the environment is the headless fallback.
  */
 export function PluginPopup({ onClose }: { onClose: () => void }) {
   return (
     <Modal
       title="Connect OpenCode to Ship-It"
-      description="Three steps, then your agent can build and run here."
+      description="One command, one approval, then your agent can build and run here."
       onClose={onClose}
     >
       <ol className="space-y-5 text-sm text-zinc-300">
@@ -22,15 +24,15 @@ export function PluginPopup({ onClose }: { onClose: () => void }) {
             1
           </span>
           <div className="min-w-0">
-            <p className="font-medium text-white">Install the plugin</p>
+            <p className="font-medium text-white">Run the login</p>
             <p className="mt-1 text-zinc-400">
               Run this where you run OpenCode:
             </p>
             <div className="mt-2 flex items-center gap-2">
               <code className="min-w-0 flex-1 break-all rounded-lg border border-white/10 bg-zinc-950/60 px-3 py-2 font-mono text-xs text-violet-100">
-                {INSTALL_COMMAND}
+                {LOGIN_COMMAND}
               </code>
-              <CopyButton text={INSTALL_COMMAND} label="Copy" />
+              <CopyButton text={LOGIN_COMMAND} label="Copy" />
             </div>
           </div>
         </li>
@@ -39,15 +41,13 @@ export function PluginPopup({ onClose }: { onClose: () => void }) {
             2
           </span>
           <div>
-            <p className="font-medium text-white">Add your API key</p>
+            <p className="font-medium text-white">Approve in the browser</p>
             <p className="mt-1 text-zinc-400">
-              Create one under{" "}
-              <Link to="/dashboard/keys" className="text-white underline underline-offset-2">
-                API keys
-              </Link>
-              , then expose it as <code className="font-mono text-xs text-zinc-200">SHIPIT_API_KEY</code> or
-              write it to <code className="font-mono text-xs text-zinc-200">~/.config/opencode/shipit.key</code>.
-              The key is shown once, at creation.
+              Your browser opens with this exact page. Sign in if needed, hit{" "}
+              <span className="text-zinc-200">Authorize</span>, and the access
+              token is stored for you — nothing to copy. Automating instead?
+              set <code className="font-mono text-xs text-zinc-200">SHIPIT_API_KEY</code> in
+              the environment OpenCode starts with.
             </p>
           </div>
         </li>
@@ -58,8 +58,8 @@ export function PluginPopup({ onClose }: { onClose: () => void }) {
           <div>
             <p className="font-medium text-white">Restart OpenCode</p>
             <p className="mt-1 text-zinc-400">
-              Restart so it picks up the plugin, then ask it to build
-              something. Full walkthrough in the{" "}
+              Restart so every tool picks up the credentials, then ask it to
+              build something. Full walkthrough in the{" "}
               <Link to="/docs" className="text-white underline underline-offset-2">
                 docs
               </Link>

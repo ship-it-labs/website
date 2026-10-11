@@ -1,5 +1,4 @@
 import { FastifyInstance, FastifyRequest } from "fastify";
-import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { supabase, usingSqlite } from "../db/index.js";
 import { authenticateApiKey } from "../middleware/auth.js";
@@ -314,6 +313,62 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
     return reply.send({ sessions });
   });
 
+  // Connected apps: OAuth grants (tokens minted through the authorize page).
+  // Listed so they can be revoked after the manual API-keys page retired;
+  // only OAuth-minted rows appear here, never legacy manual keys. Active
+  // filtering happens in code: boolean binding differs between SQLite (0/1)
+  // and Postgres (true/false).
+  app.get("/account/grants", async (req, reply) => {
+    const { data, error } = await supabase
+      .from("api_keys")
+      .select("id, name, is_active, created_at")
+      .eq("user_id", req.auth!.userId)
+      .like("name", "OpenCode (%")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      return reply.status(500).send({
+        error: { code: "INTERNAL_ERROR", message: "Could not load connected apps" },
+      });
+    }
+
+    const grants = ((data ?? []) as { id: string; name: string; is_active?: boolean | number | null; created_at: string }[])
+      .filter((row) => row.is_active === true || row.is_active === 1)
+      .map(({ id, name, created_at }) => ({ id, name, created_at }));
+
+    return reply.send({ grants });
+  });
+
+  app.delete("/account/grants/:id", async (req, reply) => {
+    const { id } = req.params as { id: string };
+
+    // Scoped to OAuth-minted rows: a crafted id for a legacy manual key must
+    // not be deletable through this endpoint (those are managed elsewhere).
+    const { data: target } = await supabase
+      .from("api_keys")
+      .select("id, name")
+      .eq("id", id)
+      .eq("user_id", req.auth!.userId)
+      .single();
+
+    const row = (target ?? null) as { id: string; name: string } | null;
+    if (!row || !row.name.startsWith("OpenCode (")) {
+      return reply.status(404).send({
+        error: { code: "NOT_FOUND", message: "Connected app not found" },
+      });
+    }
+
+    const { error } = await supabase.from("api_keys").delete().eq("id", id);
+    if (error) {
+      return reply.status(500).send({
+        error: { code: "INTERNAL_ERROR", message: "Could not revoke access" },
+      });
+    }
+
+    logger.info({ userId: req.auth!.userId, grantId: id }, "OAuth grant revoked");
+    return reply.send({ success: true });
+  });
+
   app.delete("/account/sessions/:id", async (req, reply) => {
     const { id } = req.params as { id: string };
 
@@ -357,7 +412,7 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
     return reply.send({ success: true });
   });
 
-  app.delete("/account/sessions", async (req, reply) => {    // Everything except this request's own session, which stays alive so the
+    app.delete("/account/sessions", async (req, reply) => {    // Everything except this request's own session, which stays alive so the
     // response — and the page behind it — keeps working.
     await revokeAllSessions(req.auth!.userId, bearerToken(req) || undefined);
 
@@ -377,47 +432,8 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
     return reply.send({ success: true });
   });
 
-  // User feedback for the admin panel. Rate-limited per IP so the inbox cannot
-  // be flooded; the sender is always the authenticated account, never a
-  // caller-supplied address.
-  app.post("/feedback", async (req, reply) => {
-    const parsed = z
-      .object({ message: z.string().trim().min(1).max(2000) })
-      .safeParse(req.body ?? {});
-    if (!parsed.success) {
-      return reply.status(400).send({
-        error: { code: "VALIDATION_ERROR", message: "Message must be 1-2000 characters" },
-      });
-    }
-
-    const limit = checkRateLimit(`feedback:${req.ip}`, 5, 60_000);
-    if (!limit.allowed) {
-      return reply.status(429).send({
-        error: {
-          code: "RATE_LIMITED",
-          message: "Too much feedback at once. Wait a moment and try again.",
-          retry_after_seconds: limit.retryAfterSeconds,
-        },
-      });
-    }
-
-    const { error } = await supabase.from("feedback").insert({
-      id: randomUUID(),
-      user_id: req.auth!.userId,
-      message: parsed.data.message,
-    });
-
-    if (error) {
-      // A missing table (pre-0016 database) must not 500 the button — the
-      // admin runs the migration and later messages flow again.
-      logger.warn({ err: error, userId: req.auth!.userId }, "Feedback insert failed");
-      return reply.status(500).send({
-        error: { code: "INTERNAL_ERROR", message: "Could not send feedback right now" },
-      });
-    }
-
-    return reply.status(201).send({ success: true });
-  });
+  // POST /feedback moved to routes/feedback.ts (public, with anonymous senders
+  // and tiered rate limits). The code lives on there; this hook stays auth-only.
 
   app.delete("/account", async (req, reply) => {
     // Five deletions per minute per IP: the password check already slows a
