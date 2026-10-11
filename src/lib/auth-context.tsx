@@ -48,10 +48,18 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   // Restore the session on load by asking the server who the token belongs to.
-  // Only a definitive rejection clears the token: expired, revoked, disabled
-  // or unknown. Anything else (cold start, 502, offline) keeps it, because
-  // wiping credentials over a transient failure is exactly how opening the
-  // homepage "logged out" a signed-in user. One retry covers slow wakes.
+  // The token is cleared only on proof of death (revoked, expired, disabled
+  // or unknown credentials) or a repeated rejection: a single 401 can be a
+  // deploy overlap or a backend that has not healed yet, and wiping
+  // credentials over a transient failure is exactly how opening the homepage
+  // "logged out" a signed-in user. One retry covers slow wakes.
+  const FATAL_CODES = [
+    "SESSION_REVOKED",
+    "KEY_EXPIRED",
+    "INVALID_CREDENTIALS",
+    "ACCOUNT_DISABLED",
+    "USER_NOT_FOUND",
+  ];
   useEffect(() => {
     if (!getAccessToken()) {
       setLoading(false);
@@ -68,12 +76,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
           return;
         } catch (err) {
-          const dead =
-            err instanceof ApiError && (err.status === 401 || err.status === 403);
-          if (dead) {
+          const code = err instanceof ApiError ? err.code : "";
+          const status = err instanceof ApiError ? err.status : 0;
+          const rejected = status === 401 || status === 403;
+          const provenDead = rejected && FATAL_CODES.includes(code);
+          if (provenDead || (rejected && attempt === 1)) {
             // A revoked session lands on the login page with no explanation.
             // Leave a note for it: the page shows it once, then clears it.
-            if (err instanceof ApiError && err.code === "SESSION_REVOKED") {
+            if (code === "SESSION_REVOKED") {
               try {
                 sessionStorage.setItem("shipit.session_expired", "1");
               } catch {

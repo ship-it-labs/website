@@ -126,6 +126,16 @@ export async function ensureDefaultPlan(
 
 export async function getAllPlans(): Promise<Plan[]> {
   const { data, error } = await supabase.from("plans").select("*");
-  if (error) return [];
+  // An empty or unreadable plans table must not blank the billing and pricing
+  // pages: fall back to the built-in tiers (the same values seeds write).
+  // Present rows — including admin customizations — always win.
+  if (error || !data || data.length === 0) {
+    if (error) {
+      logger.warn({ err: error }, "Plans unreadable; serving built-in tiers");
+    } else {
+      logger.warn("Plans table empty; serving built-in tiers");
+    }
+    return DEFAULT_PLANS.map((plan) => ({ ...plan }));
+  }
   return data as Plan[];
 }

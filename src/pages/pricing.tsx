@@ -65,7 +65,6 @@ const FALLBACK: Plan[] = [
 export function PricingPage() {
   usePageTitle("Pricing");
   const [plans, setPlans] = useState<Plan[]>(FALLBACK);
-  const [monthly, setMonthly] = useState(true);
 
   useEffect(() => {
     api
@@ -105,36 +104,6 @@ export function PricingPage() {
               Builds are included. You are charged for the time your apps are
               actually running.
             </p>
-
-            <div
-              className="stagger mt-9 inline-flex items-center gap-1 rounded-full border border-white/10 bg-white/[0.04] p-1 backdrop-blur-md"
-              style={{ "--i": 2 } as React.CSSProperties}
-            >
-              <button
-                type="button"
-                onClick={() => setMonthly(true)}
-                className={cn(
-                  "rounded-full px-5 py-2 text-sm transition-all duration-200",
-                  monthly
-                    ? "bg-white text-zinc-950"
-                    : "text-zinc-400 hover:text-white"
-                )}
-              >
-                Monthly
-              </button>
-              <button
-                type="button"
-                onClick={() => setMonthly(false)}
-                className={cn(
-                  "rounded-full px-5 py-2 text-sm transition-all duration-200",
-                  !monthly
-                    ? "bg-white text-zinc-950"
-                    : "text-zinc-400 hover:text-white"
-                )}
-              >
-                Annual
-              </button>
-            </div>
           </div>
 
           <div className="mx-auto mt-10 max-w-3xl">
@@ -144,15 +113,11 @@ export function PricingPage() {
             <div className="mt-16 grid gap-5 sm:grid-cols-2 lg:grid-cols-3">
             {plans.map((plan, i) => {
               const featured = plan.id === "pro";
-              const price = monthly
-                ? plan.price_cents
-                : Math.round(plan.price_cents * 0.8);
-              // The crossed-out figure follows the same billing toggle, so the
-              // comparison is always like for like. Shown only when it is
-              // genuinely higher — a stale or equal value renders nothing.
-              const previous = monthly
-                ? (plan.previous_price_cents ?? 0)
-                : Math.round((plan.previous_price_cents ?? 0) * 0.8);
+              const price = plan.price_cents;
+              // The crossed-out figure compares like for like with the price
+              // above. Shown only when it is genuinely higher — a stale or
+              // equal value renders nothing.
+              const previous = plan.previous_price_cents ?? 0;
               const onSale = previous > price && price > 0;
 
               return (
