@@ -614,3 +614,17 @@ create table if not exists public.oauth_codes (
 
 create index if not exists idx_oauth_codes_user on public.oauth_codes(user_id);
 ;
+-- ============================================================================
+-- migrations/0021_no_force_oauth.sql
+-- ============================================================================
+-- oauth_codes was created by 0019, after 0018 lifted forced RLS everywhere —
+-- so a database that forced RLS later still blocks authorization codes.
+DO $$
+BEGIN
+  BEGIN
+    EXECUTE 'ALTER TABLE public.oauth_codes NO FORCE ROW LEVEL SECURITY';
+  EXCEPTION WHEN undefined_table THEN
+    NULL;
+  END;
+END $$;
+;

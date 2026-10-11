@@ -93,8 +93,7 @@ describe("redirect validation", () => {
   });
 });
 
-describe("PKCE", () => {
-  it("accepts a matching pair", () => {
+describe("PKCE", () => {  it("accepts a matching pair", () => {
     const { verifier, challenge } = pkcePair();
     expect(() => verifyPkce(verifier, challenge)).not.toThrow();
   });
@@ -201,5 +200,43 @@ describe("code issue and exchange", () => {
         codeChallengeMethod: "plain",
       })
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
+  });
+
+  it("names a missing table as unmigrated, not a generic failure", async () => {
+    const stubDb = {
+      from: () => ({
+        insert: async () => ({ error: { code: "42P01", message: 'relation "oauth_codes" does not exist' } }),
+      }),
+    };
+    const { challenge } = pkcePair();
+    await expect(
+      createAuthCode(stubDb as never, {
+        userId: USER,
+        clientId: "opencode",
+        redirectUri: REDIRECT,
+        state: "s",
+        codeChallenge: challenge,
+        codeChallengeMethod: "S256",
+      })
+    ).rejects.toMatchObject({ code: "SERVER_ERROR", message: expect.stringMatching(/migration/i) });
+  });
+
+  it("names an RLS refusal as row-level security", async () => {
+    const stubDb = {
+      from: () => ({
+        insert: async () => ({ error: { code: "42501", message: "new row violates row-level security policy" } }),
+      }),
+    };
+    const { challenge } = pkcePair();
+    await expect(
+      createAuthCode(stubDb as never, {
+        userId: USER,
+        clientId: "opencode",
+        redirectUri: REDIRECT,
+        state: "s",
+        codeChallenge: challenge,
+        codeChallengeMethod: "S256",
+      })
+    ).rejects.toMatchObject({ code: "SERVER_ERROR", message: expect.stringMatching(/row-level security/i) });
   });
 });

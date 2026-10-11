@@ -126,6 +126,23 @@ export async function createAuthCode(
   });
   if (error) {
     logger.error({ err: error, userId: input.userId }, "Could not store OAuth code");
+    // Name the cause in the message: a missing table means the migrations
+    // never ran, an RLS rejection means forced policies or a wrong key —
+    // and "could not start" alone sends everyone hunting in the wrong place.
+    const code = (error as { code?: string }).code;
+    const message = (error as { message?: string }).message ?? "";
+    if (code === "42P01" || /relation .* does not exist|Could not find the table/i.test(message)) {
+      throw new OAuthError(
+        "SERVER_ERROR",
+        "Authorization is not set up yet (database migration missing). Try again later."
+      );
+    }
+    if (code === "42501" || /row-level security/i.test(message)) {
+      throw new OAuthError(
+        "SERVER_ERROR",
+        "The database refused the authorization (row-level security). The operator has been notified."
+      );
+    }
     throw new OAuthError("SERVER_ERROR", "Could not start the authorization");
   }
   return { code };
