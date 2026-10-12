@@ -43,7 +43,7 @@ export function SignupPage() {
   return (
     <AuthLayout
       title="Start building"
-      subtitle="24 runtime hours every month, on the house."
+      subtitle="10 runtime hours every month, on the house."
       footer={
         <>
           Already have an account?{" "}
