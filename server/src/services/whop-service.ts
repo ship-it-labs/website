@@ -434,9 +434,17 @@ const REPLAY_WINDOW_SECONDS = 5 * 60;
 
 /**
  * Verifies a Standard Webhooks signature over `{id}.{timestamp}.{body}` using
- * HMAC-SHA256 with the base64-decoded secret, then rejects anything outside the
- * replay window. The raw body must be used: re-serialising the parsed JSON
- * changes the bytes and the signature will not match.
+ * HMAC-SHA256, then rejects anything outside the replay window. The raw body
+ * must be used: re-serialising the parsed JSON changes the bytes and the
+ * signature will not match.
+ *
+ * The key is the secret exactly as Whop shows it (a `ws_…` string), used as
+ * literal bytes. Whop's backend HMACs with those literal bytes — despite the
+ * Standard Webhooks spec base64-encoding `whsec_…` secrets — so base64-decoding
+ * here derives the wrong key and every genuine delivery fails with
+ * BAD_SIGNATURE until Whop auto-disables the endpoint. Do not strip any prefix
+ * and do not pre-encode: pass the dashboard value through verbatim (trimmed of
+ * pasted whitespace only).
  */
 export function verifyWebhookSignature(params: {
   body: string;
@@ -466,7 +474,7 @@ export function verifyWebhookSignature(params: {
     return false;
   }
 
-  const key = Buffer.from(secret, "base64");
+  const key = Buffer.from(secret.trim(), "utf8");
   const expected = crypto
     .createHmac("sha256", key)
     .update(`${params.webhookId}.${params.timestamp}.${params.body}`)

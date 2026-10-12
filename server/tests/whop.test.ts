@@ -3,18 +3,18 @@ import crypto from "node:crypto";
 import { planIdFromMembership, isDuplicateKeyError, whopPlanIdOf, classifyWebhookObject, whopPlanIdFor, expectedWhopPlanEnvName, isSameTierActiveSubscription, promoCodeOf, verifyWebhookSignature } from "../src/services/whop-service.js";
 
 /**
- * Whop uses the Standard Webhooks spec. These tests exercise the real signature
- * scheme, plus the replay window and the sandbox/live split, without needing
- * Whop credentials.
- *
- * Standard Webhooks signs with base64-decoded secrets. The test secret is
- * stored as a base64 string in env; signing uses the decoded key.
+ * Whop uses the Standard Webhooks spec with one deviation that matters: the
+ * backend HMACs with the literal bytes of the `ws_…` secret it issued, not a
+ * base64-decoded key. These tests exercise the real scheme — literal-byte
+ * signing, plus the replay window and the sandbox/live split — without needing
+ * Whop credentials. A signer that base64-decodes the secret (the old bug)
+ * must fail against this verifier.
  */
-const SECRET_B64 = Buffer.from("whop-sandbox-test-secret", "utf8").toString("base64");
+const SECRET = "ws_test_sandbox_secret_0123456789abcdef";
 
-function sign(body: string, id: string, timestamp: string, secretB64 = SECRET_B64): string {
+function sign(body: string, id: string, timestamp: string, secret = SECRET): string {
   const digest = crypto
-    .createHmac("sha256", Buffer.from(secretB64, "base64"))
+    .createHmac("sha256", secret)
     .update(`${id}.${timestamp}.${body}`)
     .digest("base64");
   return `v1,${digest}`;
@@ -35,7 +35,7 @@ afterEach(() => {
 
 describe("standard webhooks signature", () => {
   beforeEach(() => {
-    process.env.WHOP_WEBHOOK_SECRET = SECRET_B64;
+    process.env.WHOP_WEBHOOK_SECRET = SECRET;
     process.env.NODE_ENV = "development";
   });
 
@@ -412,9 +412,9 @@ describe("duplicate delivery detection", () => {
 describe("environment-specific webhook secrets", () => {
   const secretKeys = ["SANDBOX_WEBHOOK_SECRET", "PROD_WEBHOOK_SECRET", "WHOP_WEBHOOK_SECRET"];
 
-  function signWith(secretB64: string, body: string, id: string, timestamp: string): string {
+  function signWith(secret: string, body: string, id: string, timestamp: string): string {
     const digest = crypto
-      .createHmac("sha256", Buffer.from(secretB64, "base64"))
+      .createHmac("sha256", secret)
       .update(`${id}.${timestamp}.${body}`)
       .digest("base64");
     return `v1,${digest}`;
@@ -434,60 +434,76 @@ describe("environment-specific webhook secrets", () => {
   }
 
   it("verifies with the sandbox secret in development", async () => {
-    const sandboxSecretB64 = Buffer.from("sandbox-only-secret", "utf8").toString("base64");
+    const sandboxSecret = "ws_test_sandbox_only_secret_aaaa1111";
     process.env.NODE_ENV = "development";
-    process.env.SANDBOX_WEBHOOK_SECRET = sandboxSecretB64;
+    process.env.SANDBOX_WEBHOOK_SECRET = sandboxSecret;
     const { verifyWebhookSignature } = await freshService();
     const { body, id, timestamp } = payload();
 
     expect(
-      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(sandboxSecretB64, body, id, timestamp) })
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(sandboxSecret, body, id, timestamp) })
     ).toBe(true);
   });
 
   it("prefers the specific secret over the legacy one", async () => {
-    const sandboxSecretB64 = Buffer.from("sandbox-only-secret", "utf8").toString("base64");
-    const legacySecretB64 = Buffer.from("legacy-secret", "utf8").toString("base64");
+    const sandboxSecret = "ws_test_sandbox_only_secret_bbbb2222";
+    const legacySecret = "ws_test_legacy_secret_cccc3333";
     process.env.NODE_ENV = "development";
-    process.env.SANDBOX_WEBHOOK_SECRET = sandboxSecretB64;
-    process.env.WHOP_WEBHOOK_SECRET = legacySecretB64;
+    process.env.SANDBOX_WEBHOOK_SECRET = sandboxSecret;
+    process.env.WHOP_WEBHOOK_SECRET = legacySecret;
     const { verifyWebhookSignature } = await freshService();
     const { body, id, timestamp } = payload();
 
     expect(
-      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(sandboxSecretB64, body, id, timestamp) })
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(sandboxSecret, body, id, timestamp) })
     ).toBe(true);
     expect(
-      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(legacySecretB64, body, id, timestamp) })
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(legacySecret, body, id, timestamp) })
     ).toBe(false);
   });
 
   it("falls back to the legacy secret when nothing specific is set", async () => {
-    const legacySecretB64 = Buffer.from("legacy-secret", "utf8").toString("base64");
+    const legacySecret = "ws_test_legacy_secret_dddd4444";
     process.env.NODE_ENV = "development";
-    process.env.WHOP_WEBHOOK_SECRET = legacySecretB64;
+    process.env.WHOP_WEBHOOK_SECRET = legacySecret;
     const { verifyWebhookSignature } = await freshService();
     const { body, id, timestamp } = payload();
 
     expect(
-      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(legacySecretB64, body, id, timestamp) })
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(legacySecret, body, id, timestamp) })
     ).toBe(true);
   });
 
   it("verifies with the production secret in production", async () => {
-    const prodSecretB64 = Buffer.from("prod-only-secret", "utf8").toString("base64");
-    const sandboxSecretB64 = Buffer.from("sandbox-only-secret", "utf8").toString("base64");
+    const prodSecret = "ws_test_prod_only_secret_eeee5555";
+    const sandboxSecret = "ws_test_sandbox_only_secret_ffff6666";
     process.env.NODE_ENV = "production";
-    process.env.PROD_WEBHOOK_SECRET = prodSecretB64;
-    process.env.SANDBOX_WEBHOOK_SECRET = sandboxSecretB64;
+    process.env.PROD_WEBHOOK_SECRET = prodSecret;
+    process.env.SANDBOX_WEBHOOK_SECRET = sandboxSecret;
     const { verifyWebhookSignature } = await freshService();
     const { body, id, timestamp } = payload();
 
     expect(
-      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(prodSecretB64, body, id, timestamp) })
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(prodSecret, body, id, timestamp) })
     ).toBe(true);
     expect(
-      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(sandboxSecretB64, body, id, timestamp) })
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: signWith(sandboxSecret, body, id, timestamp) })
+    ).toBe(false);
+  });
+
+  it("rejects a signature made with a base64-decoded key (the old bug)", async () => {
+    // The old verifier base64-decoded the secret before HMACing. Whop never
+    // did, so every genuine delivery failed. A sender making that same mistake
+    // must not verify.
+    const { verifyWebhookSignature } = await freshService();
+    const { body, id, timestamp } = payload();
+    const miskeyed = crypto
+      .createHmac("sha256", Buffer.from(SECRET, "base64"))
+      .update(`${id}.${timestamp}.${body}`)
+      .digest("base64");
+
+    expect(
+      verifyWebhookSignature({ body, webhookId: id, timestamp, signature: `v1,${miskeyed}` })
     ).toBe(false);
   });
 });
