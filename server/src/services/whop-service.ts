@@ -7,16 +7,18 @@ import { isDuplicateKeyError } from "../utils/db-errors.js";
 // Re-exported so existing imports keep working.
 export { isDuplicateKeyError };
 
-const isProduction = process.env.NODE_ENV === "production";
+function isProductionNow(): boolean {
+  return process.env.NODE_ENV === "production";
+}
 
 /**
- * Sandbox and production are genuinely different Whop hosts, not the same
- * endpoint with a test key. The SDK exposes both, so the environment choice is
- * a single switch rather than two URL strings that can drift apart.
+ * Resolved per call, not at import time: the admin panel copies DB-managed
+ * values (including both Whop keys) into process.env at boot, every minute,
+ * and after every save, so anything captured once at module load goes stale.
  */
-const ENVIRONMENT = isProduction
-  ? WhopEnvironment.Production
-  : WhopEnvironment.Sandbox;
+function whopSdkEnvironment(): WhopEnvironment {
+  return isProductionNow() ? WhopEnvironment.Production : WhopEnvironment.Sandbox;
+}
 
 const API_VERSION_DATE = process.env.WHOP_API_VERSION_DATE || "2026-07-01";
 
@@ -46,7 +48,12 @@ export class WhopConfigError extends Error {
 }
 
 export function whopEnvironmentName(): "production" | "sandbox" {
-  return isProduction ? "production" : "sandbox";
+  return isProductionNow() ? "production" : "sandbox";
+}
+
+/** Which API-key variable buys checkouts in the active environment. */
+export function expectedWhopKeyEnvName(): string {
+  return isProductionNow() ? "WHOP_LIVE_API_KEY" : "WHOP_SANDBOX_API_KEY";
 }
 
 /**
@@ -59,47 +66,93 @@ export function validateWhopConfig(): void {
 
   if (!key) {
     throw new WhopConfigError(
-      isProduction
+      isProductionNow()
         ? "WHOP_LIVE_API_KEY is required when NODE_ENV=production. Refusing to fall back to the sandbox key."
         : "WHOP_SANDBOX_API_KEY is required in development. Refusing to fall back to the live key."
     );
   }
 
-  if (isProduction && key.trim().length < 10) {
+  if (isProductionNow() && key.length < 10) {
     throw new WhopConfigError("WHOP_LIVE_API_KEY looks truncated.");
   }
 }
 
-/** Reads the credential for the active environment, per call. */
+/**
+ * Reads the credential for the active environment, per call. Trimmed: keys
+ * pasted through the admin panel or dashboards routinely arrive with trailing
+ * whitespace or a newline, and Whop rejects those with a bare 401.
+ */
 function activeApiKey(): string {
-  return isProduction
+  const raw = isProductionNow()
     ? process.env.WHOP_LIVE_API_KEY || ""
     : process.env.WHOP_SANDBOX_API_KEY || "";
+  return raw.trim();
 }
 
 let client: WhopClient | null = null;
+let clientKey = "";
+let clientEnvironment: WhopEnvironment | null = null;
 
 export function whopClient(): WhopClient {
   const key = activeApiKey();
 
   if (!key) {
     throw new WhopConfigError(
-      isProduction
+      isProductionNow()
         ? "WHOP_LIVE_API_KEY is required when NODE_ENV=production."
         : "WHOP_SANDBOX_API_KEY is required in development."
     );
   }
 
-  if (!client) {
+  // The client is rebuilt whenever the key or environment changes. Caching a
+  // single instance forever meant a rotated or corrected key (via the admin
+  // panel or the host dashboard) never took effect until the process
+  // restarted — every checkout kept failing with the old token's 401.
+  const environment = whopSdkEnvironment();
+  if (!client || clientKey !== key || clientEnvironment !== environment) {
     client = new WhopClient({
       token: key,
-      environment: ENVIRONMENT,
+      environment,
       apiVersionDate: API_VERSION_DATE,
       timeoutInSeconds: 30,
       maxRetries: 2,
     });
+    clientKey = key;
+    clientEnvironment = environment;
   }
   return client;
+}
+
+/**
+ * True when Whop rejected our credential rather than our request: a 401 from
+ * the SDK in any of its shapes (statusCode, nested body, name). Callers turn
+ * this into a configuration error naming the key variable, because "Could not
+ * start checkout" sends admins hunting through plan ids when the token itself
+ * is expired, revoked, pasted with whitespace, or from the wrong environment.
+ */
+export function isWhopAuthError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const record = err as Record<string, unknown>;
+  if (record.statusCode === 401) return true;
+  if (record.status === 401) return true;
+  const name = typeof record.name === "string" ? record.name : "";
+  if (/unauthorized/i.test(name)) return true;
+  const message = err instanceof Error ? err.message : String(record.message ?? "");
+  if (/unauthorized|authentication failed/i.test(message)) return true;
+  const body = record.body;
+  if (body && typeof body === "object") {
+    const nested = (body as Record<string, unknown>).error;
+    if (nested && typeof nested === "object") {
+      const type = ((nested as Record<string, unknown>).type ?? "") as string;
+      if (typeof type === "string" && /unauthorized/i.test(type)) return true;
+    }
+  }
+  return false;
+}
+
+/** Length of the active key for logs: enough to spot empty vs set, never the value. */
+export function whopKeyLength(): number {
+  return activeApiKey().length;
 }
 
 export interface CheckoutResult {
@@ -217,14 +270,26 @@ export async function createCheckout(options: {
 }): Promise<CheckoutResult> {
   const c = whopClient();
 
-  const checkout = await c.checkoutConfigurations.create({
-    plan_id: options.whopPlanId,
-    metadata: {
-      user_id: options.userId,
-      plan_id: options.planId,
-      ...(options.source ? { source: options.source } : {}),
-    },
-  });
+  let checkout: { id?: string; purchase_url?: string | null; plan?: { id?: string } | null };
+  try {
+    checkout = await c.checkoutConfigurations.create({
+      plan_id: options.whopPlanId,
+      metadata: {
+        user_id: options.userId,
+        plan_id: options.planId,
+        ...(options.source ? { source: options.source } : {}),
+      },
+    });
+  } catch (err) {
+    if (isWhopAuthError(err)) {
+      throw new WhopConfigError(
+        `Whop rejected the API credential for the ${whopEnvironmentName()} environment. ` +
+          `Check ${expectedWhopKeyEnvName()} (live and sandbox keys are different; ` +
+          `a rotated, revoked, or whitespace-padded key fails the same way).`
+      );
+    }
+    throw err;
+  }
 
   if (!checkout.purchase_url) {
     throw new Error("Whop did not return a purchase_url for the checkout");

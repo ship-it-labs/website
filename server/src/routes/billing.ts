@@ -9,7 +9,11 @@ import {
   handleWebhookEvent,
   whopPlanIdFor,
   expectedWhopPlanEnvName,
+  expectedWhopKeyEnvName,
+  whopEnvironmentName,
+  whopKeyLength,
   isSameTierActiveSubscription,
+  WhopConfigError,
   type WhopWebhookEvent,
 } from "../services/whop-service.js";
 import { supabase } from "../db/index.js";
@@ -111,6 +115,21 @@ export async function billingRoutes(app: FastifyInstance): Promise<void> {
 
       return reply.send({ checkout_url: purchaseUrl });
     } catch (err) {
+      // A rejected credential is a configuration problem, not a transient
+      // checkout failure: retrying with the same key 401s forever. Name the
+      // variable so the admin knows exactly what to fix; the key length (never
+      // the value) distinguishes empty from merely wrong.
+      if (err instanceof WhopConfigError) {
+        const keyEnv = expectedWhopKeyEnvName();
+        logger.error(
+          { err, planId: plan_id, whopEnv: whopEnvironmentName(), keyEnv, keyLength: whopKeyLength() },
+          "Whop credential rejected; checkout refused"
+        );
+        return reply.status(502).send({
+          error: { code: "BILLING_NOT_CONFIGURED", message: "Payments are misconfigured; checkout is unavailable" },
+          missing_env: keyEnv,
+        });
+      }
       logger.error({ err, planId: plan_id }, "Failed to create Whop checkout");
       return reply.status(502).send({
         error: { code: "CHECKOUT_FAILED", message: "Could not start checkout" },
