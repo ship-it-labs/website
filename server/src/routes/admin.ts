@@ -48,6 +48,7 @@ const DB_TABLES: { name: string; description: string; columns: string }[] = [
   { name: "platform_settings", description: "Kill switches and overrides", columns: "key, updated_at" },
   { name: "env_overrides", description: "DB-managed config (values never shown)", columns: "key, environment, updated_at" },
   { name: "admin_audit", description: "Admin action log", columns: "id, admin_id, action, target, detail, created_at" },
+  { name: "error_events", description: "Failure log (API 5xx, client reports, crashes)", columns: "id, source, method, path, status_code, error_code, message, created_at" },
 ];
 
 const managerUrl = () => process.env.SERVER_MANAGER_URL || "http://manager:3001";
@@ -476,6 +477,75 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
+  // Failure log: every API 5xx, reported browser failure and process crash,
+  // newest first. Empty (not an error) when migration 0022 is not yet applied.
+  // Filters narrow server-side; the panel also searches client-side for instant
+  // switching without refetching. Stats cover the trailing 24h so a glance
+  // answers "is the site on fire right now".
+  app.get("/admin/errors", async (req, reply) => {
+    const query = req.query as {
+      limit?: string;
+      source?: string;
+      status?: string;
+      search?: string;
+    };
+    const limit = Math.min(200, Math.max(1, Number(query.limit) || 100));
+    const source = (query.source ?? "").trim();
+    const status = Number(query.status);
+    const search = (query.search ?? "").trim().slice(0, 100);
+
+    if (source && source !== "api" && source !== "client" && source !== "process") {
+      return reply.status(400).send({
+        error: { code: "VALIDATION_ERROR", message: "Unknown error source" },
+      });
+    }
+    if (query.status && (!Number.isInteger(status) || status < 500 || status > 599)) {
+      return reply.status(400).send({
+        error: { code: "VALIDATION_ERROR", message: "Status filter must be a 5xx code" },
+      });
+    }
+
+    try {
+      let rows = supabase
+        .from("error_events")
+        .select("id, source, method, path, status_code, error_code, message, user_id, request_id, created_at")
+        .order("created_at", { ascending: false })
+        .limit(limit);
+      if (source) rows = rows.eq("source", source);
+      if (query.status) rows = rows.eq("status_code", status);
+      if (search) rows = rows.like("message", `%${search}%`);
+
+      const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+      const [listed, recent] = await Promise.all([
+        rows,
+        supabase
+          .from("error_events")
+          .select("source, status_code")
+          .gte("created_at", dayAgo)
+          .limit(2000),
+      ]);
+
+      if (listed.error) {
+        logger.warn({ err: listed.error }, "Error-events table unreadable; returning empty log");
+        return reply.send({ entries: [], stats: null, pending_migration: true });
+      }
+
+      // Aggregates in code, not SQL: the local SQLite stand-in has no GROUP
+      // BY parity, and two thousand small rows are cheap to fold here.
+      const stats = { total_24h: 0, by_source: {} as Record<string, number>, by_status: {} as Record<string, number> };
+      for (const row of ((recent.data ?? []) as { source?: string; status_code?: number | null }[])) {
+        stats.total_24h += 1;
+        if (row.source) stats.by_source[row.source] = (stats.by_source[row.source] ?? 0) + 1;
+        const key = row.status_code == null ? "client" : String(row.status_code);
+        stats.by_status[key] = (stats.by_status[key] ?? 0) + 1;
+      }
+
+      return reply.send({ entries: listed.data ?? [], stats, pending_migration: false });
+    } catch (err) {
+      logger.warn({ err }, "Error-events table unreadable; returning empty log");
+      return reply.send({ entries: [], stats: null, pending_migration: true });
+    }
+  });
   // User feedback inbox. Sender emails resolve at read time from users (never
   // stored on the row). Unread first; read entries hide unless show_read=1.
   // Read-state filtering happens in code, not SQL: boolean binding differs

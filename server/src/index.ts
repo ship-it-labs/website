@@ -32,10 +32,12 @@ import { statusRoutes } from "./routes/status.js";
 import { projectRoutes } from "./routes/projects.js";
 import { runtimeRoutes } from "./routes/runtimes.js";
 import { billingRoutes, webhookRoutes } from "./routes/billing.js";
+import { clientErrorRoutes } from "./routes/client-errors.js";
 import { websocketRoutes } from "./websockets/index.js";
 import { startLeaseExpiryWorker } from "./services/usage-worker.js";
 import { seedPlans } from "./services/plan-service.js";
 import { probeSessionWrites } from "./services/sessions.js";
+import { recordErrorEvent, errorCodeFromPayload } from "./services/error-log.js";
 import { loadEnvOverrides } from "./services/runtime-env.js";
 import { unconfiguredPlans } from "./services/whop-service.js";
 import { requestIdHook, errorEnvelope } from "./middleware/request-id.js";
@@ -55,11 +57,23 @@ const app = Fastify({
 
 // A crash log is the cheapest outage diagnosis there is. Without these the
 // process dies silently and the deploy log shows nothing but an exit code.
+// Mirrored into error_events so the admin panel sees crashes alongside API
+// and client failures instead of only in the host's log drain.
 process.on("unhandledRejection", (reason) => {
   logger.error({ err: reason }, "Unhandled promise rejection");
+  recordErrorEvent({
+    source: "process",
+    method: "rejection",
+    message: reason instanceof Error ? (reason.stack || reason.message) : String(reason),
+  });
 });
 process.on("uncaughtException", (err) => {
   logger.error({ err }, "Uncaught exception");
+  recordErrorEvent({
+    source: "process",
+    method: "exception",
+    message: err instanceof Error ? (err.stack || err.message) : String(err),
+  });
 });
 
 // Only this deployment's own origins may call the API with credentials.
@@ -119,6 +133,34 @@ app.setErrorHandler((err, req, reply) => {
   );
 });
 
+// Every failed API response lands in error_events: thrown errors via the
+// handler above, explicit `reply.status(500)` calls via this hook. onSend sees
+// the payload (onResponse does not), and recording is fire-and-forget, so the
+// response itself is never delayed by the log write. Only 5xx: 4xx responses
+// are client mistakes, not platform failures. Non-API traffic (the marketing
+// pages, static assets) is excluded — browser failures there report through
+// /client-errors instead, with the page path attached.
+app.addHook("onSend", async (req, reply, payload) => {
+  try {
+    if (reply.statusCode >= 500 && (req.url ?? "").startsWith("/api/")) {
+      const { code, message } = errorCodeFromPayload(payload);
+      recordErrorEvent({
+        source: "api",
+        method: req.method,
+        path: (req.url ?? "").split("?")[0],
+        statusCode: reply.statusCode,
+        errorCode: code,
+        message: message ?? `Request failed with status ${reply.statusCode}`,
+        userId: req.auth?.userId ?? null,
+        requestId: typeof req.requestId === "string" ? req.requestId : null,
+      });
+    }
+  } catch (err) {
+    logger.warn({ err }, "Failure-log hook threw; response unaffected");
+  }
+  return payload;
+});
+
 // authRoutes defines its own /auth/* paths, so it mounts at the version root to
 // avoid producing /api/v1/auth/auth/*.
 await app.register(authRoutes, { prefix: "/api/v1" });
@@ -140,6 +182,7 @@ await app.register(statusRoutes, { prefix: "/api/v1" });
 await app.register(projectRoutes, { prefix: "/api/v1" });
 await app.register(runtimeRoutes, { prefix: "/api/v1" });
 await app.register(billingRoutes, { prefix: "/api/v1" });
+await app.register(clientErrorRoutes, { prefix: "/api/v1" });
 await app.register(webhookRoutes, { prefix: "/api/v1" });
 await app.register(websocketRoutes);
 

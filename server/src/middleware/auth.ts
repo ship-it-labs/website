@@ -198,10 +198,34 @@ export async function authenticateApiKey(
 }
 
 /**
- * Distinguishes an expired key from a wrong one for the error message above.
- * Runs only after authentication already failed, so a second lookup here costs
- * nothing on the path that matters.
+ * Best-effort user attribution for endpoints that must record signal even from
+ * unauthenticated callers (the client error inbox). Returns the user id when
+ * the presented bearer token resolves to a live account, null otherwise —
+ * never sends a reply, never heals plans, never touches last_used. A forged or
+ * stale token degrades to anonymous rather than dropping the report.
  */
+export async function optionalAuthUserId(req: FastifyRequest): Promise<string | null> {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) return null;
+    const token = authHeader.slice(7).trim();
+    if (!token) return null;
+    const resolved = await resolveUserId(token);
+    if (!resolved) return null;
+    const { data: user } = await supabase
+      .from("users")
+      .select("id, is_active")
+      .eq("id", resolved.userId)
+      .single();
+    if (!user) return null;
+    const active = (user as { is_active?: boolean | number | null }).is_active;
+    if (active === false || active === 0) return null;
+    return resolved.userId;
+  } catch (err) {
+    logger.debug({ err }, "Optional auth attribution failed; continuing anonymously");
+    return null;
+  }
+}
 async function isExpiredKey(token: string): Promise<boolean> {
   if (!token.startsWith("ox_live_") && !token.startsWith("ox_test_")) {
     return false;

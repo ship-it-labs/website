@@ -355,6 +355,25 @@ create table if not exists server_agents (
   max_runtimes integer not null default 10,
   created_at text not null default (datetime('now'))
 );
+
+-- Every failed thing, in one place: API 5xx, reported browser failures and
+-- process crashes. Admin-only reading; user_id nullable because logged-out
+-- pages crash too. See 0022.
+create table if not exists error_events (
+  id text primary key,
+  source text not null,
+  method text,
+  path text,
+  status_code integer,
+  error_code text,
+  message text not null,
+  user_id text references users(id) on delete set null,
+  request_id text,
+  created_at text not null default (datetime('now'))
+);
+create index if not exists idx_error_events_created on error_events(created_at desc);
+create index if not exists idx_error_events_source on error_events(source, created_at desc);
+create index if not exists idx_error_events_status on error_events(status_code, created_at desc);
 `;
 
 export const SEED_PLANS_SQL = `

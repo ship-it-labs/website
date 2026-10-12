@@ -1,5 +1,6 @@
 import { Component, type ReactNode } from "react";
 import { Link, useLocation } from "react-router-dom";
+import { reportClientError } from "@/lib/error-report";
 
 interface BoundaryState {
   failed: boolean;
@@ -22,7 +23,15 @@ export class RouteErrorBoundary extends Component<
 
   componentDidCatch(error: unknown): void {
     // Visible in devtools and log drains; the UI stays human-readable.
+    // Reported too, so page crashes show up in the admin Errors tab with the
+    // route attached instead of only in the visitor's console.
     console.error("Route crashed:", error);
+    reportClientError({
+      message: error instanceof Error ? error.message || "Page crashed" : "Page crashed",
+      path: window.location.pathname,
+      kind: "render",
+      stack: error instanceof Error ? (error.stack ?? null) : null,
+    });
   }
 
   render(): ReactNode {

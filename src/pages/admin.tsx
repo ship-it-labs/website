@@ -70,7 +70,7 @@ interface Plan {
   previous_price_cents: number | null;
 }
 
-type Section = "overview" | "users" | "runtimes" | "builds" | "payments" | "analytics" | "plans" | "settings" | "environment" | "database" | "webhooks" | "audit" | "feedback";
+type Section = "overview" | "users" | "runtimes" | "builds" | "payments" | "analytics" | "plans" | "settings" | "environment" | "database" | "webhooks" | "errors" | "audit" | "feedback";
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -84,6 +84,7 @@ const SECTIONS: { id: Section; label: string }[] = [
   { id: "environment", label: "Environment" },
   { id: "database", label: "Database" },
   { id: "webhooks", label: "Webhooks" },
+  { id: "errors", label: "Errors" },
   { id: "audit", label: "Audit" },
   { id: "feedback", label: "Feedback" },
 ];
@@ -145,6 +146,7 @@ export function AdminPage() {
         </>
       )}
       {section === "webhooks" && <WebhooksSection onError={setError} />}
+      {section === "errors" && <ErrorsSection onError={setError} />}
       {section === "audit" && <AuditSection onError={setError} />}
       {section === "feedback" && <FeedbackSection onError={setError} />}
     </DashboardLayout>
@@ -1763,6 +1765,169 @@ function AuditSection({ onError }: { onError: (message: string | null) => void }
               <p className="mt-1 text-xs text-zinc-600">
                 {new Date(entry.created_at).toLocaleString()} · by{" "}
                 <span className="font-mono">{entry.admin_id.slice(0, 8)}</span>
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
+}
+
+interface ErrorEntry {
+  id: string;
+  source: "api" | "client" | "process";
+  method: string | null;
+  path: string | null;
+  status_code: number | null;
+  error_code: string | null;
+  message: string;
+  user_id: string | null;
+  request_id: string | null;
+  created_at: string;
+}
+
+interface ErrorStats {
+  total_24h: number;
+  by_source: Record<string, number>;
+  by_status: Record<string, number>;
+}
+
+// Every failure in one list: API 5xx rows (logged by the server's send hook),
+// browser failures (reported by the frontend's global handlers) and process
+// crashes. When migration 0022 is not yet applied the server answers with an
+// empty list and this panel says so instead of erroring.
+function ErrorsSection({ onError }: { onError: (message: string | null) => void }) {
+  const [entries, setEntries] = useState<ErrorEntry[]>([]);
+  const [stats, setStats] = useState<ErrorStats | null>(null);
+  const [pendingMigration, setPendingMigration] = useState(false);
+  const [source, setSource] = useState("all");
+  const [search, setSearch] = useState("");
+  const [loaded, setLoaded] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const params = new URLSearchParams({ limit: "200" });
+      if (source !== "all") params.set("source", source);
+      if (search.trim()) params.set("search", search.trim());
+      const result = await api.get<{
+        entries: ErrorEntry[];
+        stats: ErrorStats | null;
+        pending_migration: boolean;
+      }>(`/api/v1/admin/errors?${params.toString()}`);
+      setEntries(result.entries);
+      setStats(result.stats);
+      setPendingMigration(result.pending_migration);
+      setLoaded(true);
+      onError(null);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Could not load the error log");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [source]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  if (!loaded) return <p className="text-sm text-zinc-500">Loading…</p>;
+
+  return (
+    <Panel
+      title="Error log"
+      description="Every API 5xx, browser failure and process crash. Newest first."
+    >
+      {pendingMigration && (
+        <p className="mb-4 rounded-lg border border-amber-400/25 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+          The error-events table is not migrated yet, so failures are not being
+          recorded. Apply migration 0022 to start the log.
+        </p>
+      )}
+      {stats && (
+        <div className="mb-4 flex flex-wrap gap-2 text-xs">
+          <span className="rounded-md bg-white/[0.06] px-2 py-1 text-zinc-300">
+            {stats.total_24h} in the last 24h
+          </span>
+          {Object.entries(stats.by_source).map(([key, count]) => (
+            <span key={key} className="rounded-md bg-white/[0.06] px-2 py-1 text-zinc-400">
+              {key}: {count}
+            </span>
+          ))}
+          {Object.entries(stats.by_status).map(([key, count]) => (
+            <span key={key} className="rounded-md bg-white/[0.06] px-2 py-1 font-mono text-zinc-400">
+              {key}: {count}
+            </span>
+          ))}
+        </div>
+      )}
+      <div className="mb-4 flex flex-wrap items-center gap-2">
+        <label htmlFor="errors-source-filter" className="text-xs uppercase tracking-wide text-zinc-500">
+          Source
+        </label>
+        <select
+          id="errors-source-filter"
+          value={source}
+          onChange={(event) => setSource(event.target.value)}
+          className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-200 focus:border-violet-500/60 focus:outline-none [&>option]:bg-zinc-900"
+        >
+          <option value="all">All sources</option>
+          <option value="api">API</option>
+          <option value="client">Browser</option>
+          <option value="process">Process</option>
+        </select>
+        <input
+          type="search"
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") load();
+          }}
+          placeholder="Search messages…"
+          aria-label="Search error messages"
+          className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none"
+        />
+        <button
+          type="button"
+          onClick={load}
+          className="rounded-lg border border-white/10 px-3 py-2 text-sm text-zinc-300 transition-colors hover:border-white/20 hover:text-white"
+        >
+          Refresh
+        </button>
+      </div>
+      {entries.length === 0 ? (
+        <EmptyState>
+          {pendingMigration
+            ? "No entries yet — the log starts once migration 0022 is applied."
+            : "No failures recorded. API 5xx responses, page crashes and failed loads will appear here."}
+        </EmptyState>
+      ) : (
+        <ul className="divide-y divide-white/[0.06]">
+          {entries.map((entry) => (
+            <li key={entry.id} className="py-3 first:pt-0 last:pb-0">
+              <p className="flex flex-wrap items-center gap-2 text-sm text-zinc-200">
+                <span className="rounded-md bg-rose-500/15 px-1.5 py-0.5 font-mono text-xs text-rose-200">
+                  {entry.status_code ?? entry.source}
+                </span>
+                {entry.error_code && (
+                  <span className="rounded-md bg-white/[0.06] px-1.5 py-0.5 font-mono text-xs text-violet-200">
+                    {entry.error_code}
+                  </span>
+                )}
+                {(entry.method || entry.path) && (
+                  <span className="font-mono text-xs text-zinc-400">
+                    {[entry.method, entry.path].filter(Boolean).join(" ")}
+                  </span>
+                )}
+              </p>
+              <p className="mt-1 break-words text-xs text-zinc-500">{entry.message}</p>
+              <p className="mt-1 text-xs text-zinc-600">
+                {new Date(entry.created_at).toLocaleString()}
+                {entry.request_id && (
+                  <> · <span className="font-mono">{entry.request_id.slice(0, 8)}</span></>
+                )}
+                {entry.user_id && (
+                  <> · user <span className="font-mono">{entry.user_id.slice(0, 8)}</span></>
+                )}
               </p>
             </li>
           ))}

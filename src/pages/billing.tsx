@@ -36,6 +36,68 @@ function money(cents: number): string {
   return `$${(cents / 100).toFixed(cents % 100 === 0 ? 0 : 2)}`;
 }
 
+/**
+ * Post-checkout confirmation without a manual refresh. The tier bought in
+ * Whop is stashed before leaving the tab; on return the page polls the
+ * subscription until the webhook lands (usually seconds) and the new tier
+ * renders on its own. Stale stashes (older than 15 minutes) are ignored so an
+ * abandoned checkout never nags forever.
+ */
+const PENDING_PLAN_KEY = "shipit.pendingPlan";
+const CONFIRM_INTERVAL_MS = 3000;
+const CONFIRM_MAX_ATTEMPTS = 40;
+
+interface PendingPlan {
+  plan: string;
+  startedAt: number;
+}
+
+function readPendingPlan(): PendingPlan | null {
+  try {
+    const raw = sessionStorage.getItem(PENDING_PLAN_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<PendingPlan>;
+    if (typeof parsed.plan !== "string" || typeof parsed.startedAt !== "number") return null;
+    if (Date.now() - parsed.startedAt > 15 * 60 * 1000) {
+      sessionStorage.removeItem(PENDING_PLAN_KEY);
+      return null;
+    }
+    return { plan: parsed.plan, startedAt: parsed.startedAt };
+  } catch {
+    return null;
+  }
+}
+
+function stashPendingPlan(plan: string): void {
+  try {
+    sessionStorage.setItem(PENDING_PLAN_KEY, JSON.stringify({ plan, startedAt: Date.now() }));
+  } catch {
+    // Private mode or quota: confirmation just won't auto-poll.
+  }
+}
+
+function clearPendingPlan(): void {
+  try {
+    sessionStorage.removeItem(PENDING_PLAN_KEY);
+  } catch {
+    // Nothing to do.
+  }
+}
+
+function planName(plans: Plan[], planId: string): string {
+  return plans.find((p) => p.id === planId)?.name ?? planId;
+}
+
+function planConfirmed(planId: string, subscription: Subscription | null): boolean {
+  return (
+    !!subscription &&
+    subscription.plan_id === planId &&
+    (subscription.status === "active" ||
+      subscription.status === "past_due" ||
+      subscription.status === "trialing")
+  );
+}
+
 type CardAction =
   | { kind: "current" }
   | { kind: "subscribe" }
@@ -96,26 +158,72 @@ export function BillingPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const [confirmCancel, setConfirmCancel] = useState(false);
   const [downgradeTarget, setDowngradeTarget] = useState<Plan | null>(null);
+  // A checkout just started in this tab: poll until the webhook lands instead
+  // of showing the old tier until someone hits refresh.
+  const [pending, setPending] = useState<PendingPlan | null>(readPendingPlan);
+  const [timedOutPlan, setTimedOutPlan] = useState<string | null>(null);
+
+  const fetchBilling = useCallback(async () => {
+    const [p, s] = await Promise.all([
+      api.get<{ plans: Plan[] }>("/api/v1/plans"),
+      api.get<{ subscription: Subscription | null }>("/api/v1/billing/subscription"),
+    ]);
+    // Cheapest first, always: database row order is insertion order, which is
+    // how Plus once displayed between Free and Ultra.
+    return {
+      plans: [...p.plans].sort((a, b) => a.price_cents - b.price_cents),
+      subscription: s.subscription,
+    };
+  }, []);
 
   const load = useCallback(async () => {
     try {
-      const [p, s] = await Promise.all([
-        api.get<{ plans: Plan[] }>("/api/v1/plans"),
-        api.get<{ subscription: Subscription | null }>("/api/v1/billing/subscription"),
-      ]);
-      // Cheapest first, always: database row order is insertion order, which is
-      // how Plus once displayed between Free and Ultra.
-      setPlans([...p.plans].sort((a, b) => a.price_cents - b.price_cents));
-      setSubscription(s.subscription);
+      const { plans, subscription } = await fetchBilling();
+      setPlans(plans);
+      setSubscription(subscription);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not load billing");
     }
-  }, []);
+  }, [fetchBilling]);
 
   useEffect(() => {
     load();
   }, [load]);
+
+  // After returning from Whop the subscription row lags the payment: the
+  // webhook confirming it arrives seconds later. While a checkout is pending,
+  // refetch every few seconds so the new tier appears on its own. Quiet
+  // refreshes (no error banner per attempt — failures just keep polling until
+  // the ~2 minute budget runs out, then a "check again" note takes over).
+  const confirming = pending !== null && !planConfirmed(pending.plan, subscription);
+  useEffect(() => {
+    if (!pending) return;
+    if (planConfirmed(pending.plan, subscription)) {
+      clearPendingPlan();
+      setPending(null);
+      return;
+    }
+    let attempts = 0;
+    const timer = setInterval(async () => {
+      attempts += 1;
+      if (attempts >= CONFIRM_MAX_ATTEMPTS) {
+        clearInterval(timer);
+        clearPendingPlan();
+        setTimedOutPlan(pending.plan);
+        setPending(null);
+        return;
+      }
+      try {
+        const { plans, subscription } = await fetchBilling();
+        setPlans(plans);
+        setSubscription(subscription);
+      } catch {
+        // Keep polling; the api helper already console.errors each failure.
+      }
+    }, CONFIRM_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [pending, subscription, fetchBilling]);
 
   async function checkout(planId: string) {
     setBusy(planId);
@@ -124,6 +232,10 @@ export function BillingPage() {
       const result = await api.post<{ checkout_url: string }>("/api/v1/billing/checkout", {
         plan_id: planId,
       });
+      // Remembered across the Whop redirect (same tab, so sessionStorage
+      // survives): the billing page polls for this tier on return.
+      stashPendingPlan(planId);
+      setTimedOutPlan(null);
       window.location.href = result.checkout_url;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not start checkout");
@@ -166,6 +278,37 @@ export function BillingPage() {
         <p className="mb-8 rounded-xl border border-rose-400/25 bg-rose-500/10 px-5 py-4 text-sm text-rose-200">
           {error}
         </p>
+      )}
+
+      {confirming && pending && (
+        <p className="mb-8 flex items-center gap-3 rounded-xl border border-violet-400/25 bg-violet-500/10 px-5 py-4 text-sm text-violet-200">
+          <span className="relative flex h-2.5 w-2.5 shrink-0">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-violet-400 opacity-60" />
+            <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-violet-400" />
+          </span>
+          Confirming your {planName(plans, pending.plan)} payment… this page
+          updates on its own when Whop confirms — no need to refresh.
+        </p>
+      )}
+
+      {timedOutPlan && !confirming && (
+        <div className="mb-8 flex flex-col gap-3 rounded-xl border border-amber-400/25 bg-amber-500/10 px-5 py-4 text-sm text-amber-200 sm:flex-row sm:items-center sm:justify-between">
+          <p>
+            Confirmation is taking longer than expected. If Whop already charged
+            you, the plan lands the moment its confirmation arrives.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              stashPendingPlan(timedOutPlan);
+              setPending({ plan: timedOutPlan, startedAt: Date.now() });
+              setTimedOutPlan(null);
+            }}
+            className="shrink-0 rounded-xl border border-amber-400/30 px-4 py-2 text-sm font-medium transition-colors hover:bg-amber-500/20"
+          >
+            Check again
+          </button>
+        </div>
       )}
 
       {subscription && currentPlan ? (

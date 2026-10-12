@@ -1,5 +1,7 @@
 const API_BASE = import.meta.env.VITE_API_BASE ?? "";
 
+import { reportClientError } from "@/lib/error-report";
+
 export class ApiError extends Error {
   readonly status: number;
   readonly code: string;
@@ -57,17 +59,41 @@ export async function apiRequest<T>(
   path: string,
   options: { method?: string; body?: unknown } = {}
 ): Promise<T> {
-  const response = await fetch(`${API_BASE}${path}`, {
-    method: options.method ?? "GET",
-    headers: { "Content-Type": "application/json", ...(await authHeaders()) },
-    body: options.body === undefined ? undefined : JSON.stringify(options.body),
-  });
+  const method = options.method ?? "GET";
+  let response: Response;
+  try {
+    response = await fetch(`${API_BASE}${path}`, {
+      method,
+      headers: { "Content-Type": "application/json", ...(await authHeaders()) },
+      body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    });
+  } catch (err) {
+    // The request never got an answer: offline tab, CORS misconfiguration, or
+    // the server is down. Visible in devtools and in the admin Errors tab.
+    const message = err instanceof Error ? err.message : "Network request failed";
+    console.error(`Failed to load ${method} ${path}: ${message}`);
+    reportClientError({ message, path, kind: "api" });
+    throw err instanceof Error ? err : new Error(message);
+  }
 
   const text = await response.text();
   const body = text ? safeParse(text) : null;
 
   if (!response.ok) {
-    throw ApiError.from(response.status, body);
+    const failure = ApiError.from(response.status, body);
+    if (response.status >= 500) {
+      console.error(
+        `Failed to load ${method} ${path}: ${response.status} ${failure.code} — ${failure.message}`
+      );
+      reportClientError({
+        message: failure.message,
+        path,
+        kind: "api",
+        status: response.status,
+        code: failure.code,
+      });
+    }
+    throw failure;
   }
 
   return body as T;
