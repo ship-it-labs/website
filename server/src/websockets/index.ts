@@ -40,7 +40,7 @@ function isApiKey(token: string): boolean {
 async function authenticateSocket(token: string | undefined): Promise<string | null> {
   if (!token) return null;
 
-  let userId: string | null = null;
+  let userId: string | null;
 
   if (isApiKey(token)) {
     const { data } = await supabase

@@ -20,14 +20,12 @@ const SECTIONS: Section[] = [
     id: "connect",
     title: "Connect OpenCode",
     body: [
-      "There are no API keys to copy. Run the login, approve in the browser that opens, and the access token is stored for you — then restart OpenCode so every tool picks it up.",
-      "The login starts a temporary server on your own machine, opens the Ship-It authorize page, and exchanges a one-time code for a token. Nothing secret ever passes through the chat. You can revoke access any time from Settings → Connected apps.",
-      "Headless or automated setups can set SHIPIT_API_KEY instead: use a token from a machine where you ran the login once. The plugin reads the environment first and the key file second, because launchers do not always forward custom environment variables to plugins.",
+      "There is exactly one way to connect: run the login command. It opens a browser page where you approve, stores the access token for you, and adds the plugin to your OpenCode config — then restart OpenCode so every tool picks it up.",
+      "The login starts a temporary server on your own machine, opens the Ship-It authorize page, and on approval exchanges a one-time code plus a PKCE proof for an access token. Nothing secret ever passes through the chat. You can revoke access any time from Settings → Connected apps.",
     ],
     code: `npx opencode-shipit-runtime login`,
     extra: [
       ["config", `"plugin": ["opencode-shipit-runtime"]`],
-      ["headless", "SHIPIT_API_KEY=ox_live_xxxxxxxx"],
     ],
   },
   {

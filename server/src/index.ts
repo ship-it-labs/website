@@ -33,6 +33,7 @@ import { projectRoutes } from "./routes/projects.js";
 import { runtimeRoutes } from "./routes/runtimes.js";
 import { billingRoutes, webhookRoutes } from "./routes/billing.js";
 import { clientErrorRoutes } from "./routes/client-errors.js";
+import { agentRoutes } from "./routes/agent.js";
 import { websocketRoutes } from "./websockets/index.js";
 import { startLeaseExpiryWorker } from "./services/usage-worker.js";
 import { seedPlans } from "./services/plan-service.js";
@@ -183,6 +184,7 @@ await app.register(projectRoutes, { prefix: "/api/v1" });
 await app.register(runtimeRoutes, { prefix: "/api/v1" });
 await app.register(billingRoutes, { prefix: "/api/v1" });
 await app.register(clientErrorRoutes, { prefix: "/api/v1" });
+await app.register(agentRoutes, { prefix: "/api/v1" });
 await app.register(webhookRoutes, { prefix: "/api/v1" });
 await app.register(websocketRoutes);
 

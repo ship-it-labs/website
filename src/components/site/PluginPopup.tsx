@@ -44,10 +44,8 @@ export function PluginPopup({ onClose }: { onClose: () => void }) {
             <p className="font-medium text-white">Approve in the browser</p>
             <p className="mt-1 text-zinc-400">
               Your browser opens with this exact page. Sign in if needed, hit{" "}
-              <span className="text-zinc-200">Authorize</span>, and the access
-              token is stored for you — nothing to copy. Automating instead?
-              set <code className="font-mono text-xs text-zinc-200">SHIPIT_API_KEY</code> in
-              the environment OpenCode starts with.
+              <span className="text-zinc-200">Authorize</span>, and everything
+              is set up for you — token stored, plugin added. Nothing to copy.
             </p>
           </div>
         </li>

@@ -186,7 +186,7 @@ export function isTransientDispatchFailure(status: number, detail: string): bool
 }
 
 async function githubError(resp: Response): Promise<GitHubDispatchError> {
-  let detail = "";
+  let detail: string;
   try {
     const body = (await resp.json()) as { message?: string };
     detail = body.message ?? "";

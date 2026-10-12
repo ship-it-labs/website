@@ -21,7 +21,7 @@ export function useCopy(resetMs = 1600): {
 
   const copy = useCallback(
     async (text: string): Promise<boolean> => {
-      let ok = false;
+      let ok: boolean;
       try {
         if (navigator.clipboard?.writeText) {
           await navigator.clipboard.writeText(text);

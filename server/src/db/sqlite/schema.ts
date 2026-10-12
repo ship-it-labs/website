@@ -374,6 +374,42 @@ create table if not exists error_events (
 create index if not exists idx_error_events_created on error_events(created_at desc);
 create index if not exists idx_error_events_source on error_events(source, created_at desc);
 create index if not exists idx_error_events_status on error_events(status_code, created_at desc);
+
+-- The in-site assistant: per-user threads, their messages, and a shared,
+-- expiring response cache. See 0023.
+create table if not exists agent_conversations (
+  id text primary key,
+  user_id text not null references users(id) on delete cascade,
+  title text not null default 'New conversation',
+  created_at text not null default (datetime('now')),
+  updated_at text not null default (datetime('now'))
+);
+create index if not exists idx_agent_conversations_user on agent_conversations(user_id, updated_at desc);
+
+create table if not exists agent_messages (
+  id text primary key,
+  conversation_id text not null references agent_conversations(id) on delete cascade,
+  user_id text not null references users(id) on delete cascade,
+  role text not null check (role in ('user','assistant','tool')),
+  content text not null,
+  model text,
+  tool_name text,
+  tokens integer,
+  cache_hit integer not null default 0,
+  created_at text not null default (datetime('now'))
+);
+create index if not exists idx_agent_messages_conversation on agent_messages(conversation_id, created_at);
+
+create table if not exists agent_cache (
+  cache_key text primary key,
+  scope text not null default 'global',
+  model text not null,
+  response text not null,
+  hits integer not null default 0,
+  created_at text not null default (datetime('now')),
+  expires_at text not null
+);
+create index if not exists idx_agent_cache_expires on agent_cache(expires_at);
 `;
 
 export const SEED_PLANS_SQL = `

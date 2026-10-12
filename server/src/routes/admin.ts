@@ -754,7 +754,7 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   }
 
   app.get("/admin/runtimes", async (req, reply) => {
-    let runtimes: Record<string, unknown>[] = [];
+    let runtimes: Record<string, unknown>[];
     try {
       const result = await callOrchestrator<{ runtimes: Record<string, unknown>[] }>(
         "/runtime/list-all",
