@@ -18,7 +18,24 @@ relevant section whenever you finish something._
 - **Context:** the server-agent is actually deployed at
   `https://server-agent1-ship-it.onrender.com`. The orchestrator/control plane is
   falling back to `127.0.0.1:10000` instead of the Render URL.
-- **Where to look:**
+- **ROOT CAUSE (found 2026-10-13):** the error is raised **inside the Go
+  server-agent**, not the website. `server-agent/internal/orchestrator/server.go:136`
+  maps any unclassified `Start` error to `NO_CAPACITY`, wrapping
+  `manager.ErrNoCapacity` / `agent unreachable: Post "<agent.url>/internal/runtime/start"`.
+  The failing URL is the address the agent **advertised at registration**. In
+  `cmd/agent/main.go` it defaulted to `SELF_URL = http://127.0.0.1:$PORT`; on Render
+  `PORT=10000`, so the agent registered `http://127.0.0.1:10000`
+  (`internal/manager/manager.go:83` posts `{url: m.baseURL}` to the manager). The
+  manager stored it, the orchestrator dialed it from **another host**, and got
+  `connection refused`. Nothing to do with website `AGENT_URL`/`env_overrides`.
+- **FIX (applied):** `cmd/agent/main.go` now resolves self URL as
+  `SELF_URL` → **`RENDER_EXTERNAL_URL`** → loopback. Render sets
+  `RENDER_EXTERNAL_URL` automatically, so a redeploy self-corrects. `go build ./...`
+  passes. Still set `SELF_URL=https://server-agent1-ship-it.onrender.com` explicitly
+  on the agent service for clarity, and confirm manager/orchestrator share the same
+  `AGENT_SECRET`/`ORCHESTRATOR_SECRET`. Verify no `127.0.0.1` remains in the
+  agent-registry (`server_agents.url`) after redeploy.
+- **Where to look (for reference):**
   - `server/src/services/orchestrator-client.ts` — base URL selection / fallback to localhost.
   - `server/src/services/diagnostics.ts` — "agent unreachable" message + which URL it used.
   - Env: `AGENT_URL` / `SERVER_AGENT_URL` / agent registry (`server_agents` table,
@@ -40,9 +57,30 @@ relevant section whenever you finish something._
 - **Symptom:** GitHub Actions workflow has **completed (success/failure)**, but the
   Ship-It dashboard and the plugin/tools still show the build as **`running`**
   (and it never flips to success/failure/timeout).
-- **Likely cause:** the **build report webhook back from GitHub Actions** is not reaching
-  the control plane, or is being rejected, so the poller never marks the build terminal.
-- **Where to look:**
+- **ROOT CAUSE (confirmed 2026-10-12/13 via GitHub API):** the build runs in the
+  **`ship-it-labs/opencode-plugin`** repo (`build-service.ts` dispatches
+  `actions/workflows/build.yml/dispatches` on `GITHUB_REPO`). That workflow's final
+  `Report result` step (`opencode-plugin/.github/workflows/build.yml:611`) posts back to
+  `${{ vars.PLATFORM_API_URL }}/api/v1/builds/$BUILD_ID/report` with
+  `${{ secrets.BUILD_REPORT_TOKEN }}`. **The repo — and the whole `ship-it-labs` org — have
+  ZERO Action variables and ZERO secrets**, so the step takes its skip branch
+  (`… unset, skipping the build report`, still `exit 0`, so the step shows green) and
+  nothing ever moves the row. Confirmed: latest `Platform build` run **38294074744**
+  finished `completed/success`, step 31 `Report result` = `success` (a false green), while
+  the build row stayed `running`. The only thing that ever closes these rows is the
+  `isBuildOverdue` backstop in `runtime-build.ts` → they eventually land as `timeout`.
+  Note `Report result` / `Deliver bundle` always report success to GitHub even when
+  skipped, so Actions history looks fine — the build error is silent.
+- **FIX (config, prod):** on `ship-it-labs/opencode-plugin` set
+  - repo **variable** `PLATFORM_API_URL = https://ship-it-fri1.onrender.com` — **[DONE]**
+    set via the GitHub API on 2026-10-13.
+  - repo **secret** `BUILD_REPORT_TOKEN = <same value as the prod (Render) control plane's
+    BUILD_REPORT_TOKEN>` — **[PENDING, user]**: `gh secret set BUILD_REPORT_TOKEN
+    --repo ship-it-labs/opencode-plugin`.
+  Then re-run a Platform build to confirm the row flips to `success`/`failure`.
+  `PUBLIC_BASE_URL`/`BUILD_REPORT_TOKEN` in the local root `.env` are **dev** values
+  (`http://127.0.0.1:3000`) and must NOT be used for the repo secret.
+- **Where to look (for reference):**
   - `server/src/routes/build-reports.ts` — the endpoint GitHub Actions calls back
     (`/api/v1/build-reports`) + shared-secret check.
   - `server/src/services/build-service.ts` — `createBuild`, status transitions,
@@ -143,6 +181,39 @@ very aggressive input+output caching.
 - Side-effect turns (report/complaint/refund) **never** read or write the output cache.
 - All reads/scopes are by `user_id`; the model can never see another account.
 - Context is trimmed to `AGENT_CONTEXT_TOKENS` (default 30000).
+
+---
+
+## 2b. DO LAST (when everything else is done) — gate AI to paid tiers + per-tier AI credits
+
+**Requested:** only **paid tiers** may use the in-site AI (and the assistant's admin-side
+report surfaces), and each paid tier gets a **different amount of AI credits**. Pro starts at
+**50 AI credits** — a "reasonable" amount — with **token caps per input and per output** so a
+single message can't burn a month's budget.
+
+**Scope:**
+- [ ] **Access gate:** `POST /agent/messages`, `/agent/report`, and the assistant widget are
+      **paid-only** (Pro/Ultra). Free users see an upsell instead of the chat. Decide whether
+      "and admin" means: admin routes stay role-gated (as today) *and* the assistant report
+      inbox is paid/admin-only — keep admin auth role-based, don't tie it to a paid plan.
+- [ ] **Per-tier credit table** (credits → tokens). Starting point:
+      - Pro → **50 credits / month**.
+      - Ultra → higher (e.g. 3–5× Pro) — pick a value.
+      - Free → **0** (no AI).
+      Define `1 credit = N tokens` (e.g. 1 credit ≈ 2k tokens) and store the table in one place
+      (config/service, mirrored to `plans`/tier config + admin panel so it's editable).
+- [ ] **Per-message caps:** hard `max_input_tokens` and `max_output_tokens` per request (reject
+      or truncate over-budget input; set `max_tokens` on the model call). Make them per-tier.
+- [ ] **Metering:** record tokens (prompt + completion, honouring `cached_tokens`) per user per
+      billing period inside `agent-service`; decrement credits; reset monthly. Reuse the
+      existing usage/quota patterns (§9 "Tiers").
+- [ ] **Enforcement:** over the cap → `402`/`429` with a clear "out of AI credits" message +
+      tier upgrade CTA; never silently truncate a paid user's answer without telling them.
+- [ ] **Cache interaction:** cache hits should **not** charge credits (or charge a reduced
+      amount) — decide and document.
+- [ ] **Admin:** surface per-user AI credit usage (used / remaining) in the admin panel.
+- [ ] Tests: gate (free blocked, pro allowed), cap enforcement (input/output), monthly reset,
+      cache-hit free. Run `pnpm verify`.
 
 ---
 
@@ -260,8 +331,13 @@ probabilistically (~2%); `/client-errors` 30/min per IP; attribution fail-open a
 
 ## 10. Suggested order of attack
 
-1. **BUG-A** (runtime 502 — blocking all deployments).
-2. **BUG-B** (build stuck "running" — blocking trust in builds/tools).
+1. ~~**BUG-A** (runtime 502 — blocking all deployments)~~ — **DONE**: root cause found
+   (agent advertised `127.0.0.1:10000`), code fix in `server-agent/cmd/agent/main.go`
+   (`SELF_URL` → `RENDER_EXTERNAL_URL` → loopback), `go build` passes. **Requires an agent
+   redeploy** and ideally `SELF_URL=https://server-agent1-ship-it.onrender.com` set explicitly.
+2. **BUG-B** (build stuck "running" — blocking trust in builds/tools) — **root cause
+   confirmed**: missing repo var/secret on `ship-it-labs/opencode-plugin`. Set
+   `PLATFORM_API_URL` + `BUILD_REPORT_TOKEN` (see §0).
 3. **RLS 42501 + migrations 0022/0023** (prod writes failing; agent tables missing).
 4. **Render redeploy** of the agent commit.
 5. Finish agent frontend + the two missing test files; `pnpm verify`; commit.
