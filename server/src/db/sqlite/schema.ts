@@ -75,6 +75,27 @@ export function applyMigrations(db: SqliteDatabase): void {
 
     db.exec(`alter table ${table} drop column ${column}`);
   }
+
+  ensureProjectNameIndex(db);
+}
+
+/**
+ * A project display name must be unique per account so two accounts cannot
+ * share identity, and a name is never reused for a second project. Mirrors
+ * 0025. Wrapped because an existing database may already hold duplicates (for
+ * example a legacy project and an upload that both defaulted to the same name);
+ * those keep the index from building, and the route-level ownership check still
+ * isolates accounts in the meantime.
+ */
+function ensureProjectNameIndex(db: SqliteDatabase): void {
+  const columns = db.prepare("pragma table_info(projects)").all() as { name: string }[];
+  if (columns.length === 0) return;
+
+  try {
+    db.exec("create unique index if not exists idx_projects_user_name on projects(user_id, name)");
+  } catch {
+    // Duplicates already present; leave the database usable.
+  }
 }
 
 function backfillKeyIds(db: SqliteDatabase): void {
@@ -410,6 +431,24 @@ create table if not exists agent_cache (
   expires_at text not null
 );
 create index if not exists idx_agent_cache_expires on agent_cache(expires_at);
+
+-- Assistant credit accounting: one row per user per calendar month. See 0024.
+create table if not exists agent_usage (
+  id text primary key,
+  user_id text not null references users(id) on delete cascade,
+  period_start text not null,
+  input_tokens integer not null default 0,
+  output_tokens integer not null default 0,
+  cached_tokens integer not null default 0,
+  requests integer not null default 0,
+  cache_hits integer not null default 0,
+  cost_usd real not null default 0,
+  created_at text not null default (datetime('now')),
+  updated_at text not null default (datetime('now')),
+  unique (user_id, period_start)
+);
+create index if not exists idx_agent_usage_period on agent_usage(period_start desc);
+create index if not exists idx_agent_usage_user on agent_usage(user_id, period_start desc);
 `;
 
 export const SEED_PLANS_SQL = `

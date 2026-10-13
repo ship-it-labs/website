@@ -5,6 +5,7 @@ import {
   agentApi,
   newMessageId,
   type AgentConversation,
+  type AgentCredits,
   type AgentMessage,
   type AgentStatus,
 } from "@/lib/agent";
@@ -37,6 +38,7 @@ export function AssistantWidget() {
   const { user, loading } = useAuth();
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<AgentStatus | null>(null);
+  const [credits, setCredits] = useState<AgentCredits | null>(null);
   const [conversations, setConversations] = useState<AgentConversation[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<AgentMessage[]>([]);
@@ -86,6 +88,16 @@ export function AssistantWidget() {
         const result = await agentApi.status();
         setStatus(result);
         if (!result.enabled) return;
+        // The allowance decides whether the panel shows the chat or the
+        // upgrade prompt, so it is fetched alongside the status.
+        let allowance: AgentCredits | null = null;
+        try {
+          allowance = (await agentApi.credits()).credits;
+          setCredits(allowance);
+        } catch {
+          // A credits read failure must not block an otherwise working chat.
+        }
+        if (allowance && !allowance.allowed) return;
         const list = await loadConversations();
         if (list.length > 0) await openConversation(list[0].id);
       } catch {
@@ -131,9 +143,22 @@ export function AssistantWidget() {
           createdAt: new Date().toISOString(),
         },
       ]);
+      setCredits(turn.credits);
       void loadConversations();
     } catch (err) {
-      setError(friendly(err));
+      if (
+        err instanceof ApiError &&
+        (err.code === "AI_UPGRADE_REQUIRED" || err.code === "AI_QUOTA_EXCEEDED")
+      ) {
+        setError(err.message);
+        try {
+          setCredits((await agentApi.credits()).credits);
+        } catch {
+          // Keep the previous allowance; the composer stays hidden regardless.
+        }
+      } else {
+        setError(friendly(err));
+      }
     } finally {
       setBusy(false);
     }
@@ -176,6 +201,11 @@ export function AssistantWidget() {
   }
 
   const disabled = status ? !status.enabled : false;
+  const paidBlocked = credits ? !credits.allowed : false;
+  const creditsLabel =
+    credits && !credits.unlimited
+      ? `${credits.remainingCredits} of ${credits.limitCredits} AI credits left`
+      : null;
 
   return (
     <>
@@ -199,9 +229,11 @@ export function AssistantWidget() {
               <p className="truncate text-[11px] text-zinc-500">
                 {disabled
                   ? "Temporarily unavailable"
-                  : messages.length > 0
-                    ? "Knows your account, builds and docs"
-                    : "Ask about your account or how something works"}
+                  : creditsLabel
+                    ? creditsLabel
+                    : messages.length > 0
+                      ? "Knows your account, builds and docs"
+                      : "Ask about your account or how something works"}
               </p>
             </div>
             <button
@@ -211,13 +243,15 @@ export function AssistantWidget() {
             >
               {panel === "history" ? "Back" : "Chats"}
             </button>
-            <button
-              type="button"
-              onClick={() => setPanel(panel === "report" ? "chat" : "report")}
-              className="rounded-lg px-2 py-1 text-[11px] text-zinc-400 hover:bg-white/5 hover:text-white"
-            >
-              Report
-            </button>
+            {!paidBlocked && (
+              <button
+                type="button"
+                onClick={() => setPanel(panel === "report" ? "chat" : "report")}
+                className="rounded-lg px-2 py-1 text-[11px] text-zinc-400 hover:bg-white/5 hover:text-white"
+              >
+                Report
+              </button>
+            )}
             <button
               type="button"
               onClick={startNewChat}
@@ -237,8 +271,26 @@ export function AssistantWidget() {
 
           {disabled ? (
             <div className="flex flex-1 items-center justify-center px-6 text-center text-sm text-zinc-400">
-              The assistant is offline right now. You can still send a report and a
-              human will pick it up.
+              The assistant is offline right now. Please try again shortly.
+            </div>
+          ) : paidBlocked ? (
+            <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center">
+              <p className="text-sm text-zinc-200">
+                {credits?.reason === "free"
+                  ? "The Ship-It Assistant is available on the Pro and Ultra plans."
+                  : "You have used all of your AI credits for this month."}
+              </p>
+              <p className="text-xs text-zinc-500">
+                {credits?.reason === "free"
+                  ? "Upgrade to ask about your account, builds and docs."
+                  : "Your credits reset at the start of your next billing period."}
+              </p>
+              <a
+                href="/billing"
+                className="rounded-xl bg-white px-4 py-2 text-sm font-medium text-zinc-950"
+              >
+                {credits?.reason === "free" ? "See plans" : "Upgrade plan"}
+              </a>
             </div>
           ) : panel === "history" ? (
             <div className="flex-1 overflow-y-auto p-2">

@@ -34,16 +34,32 @@ export interface AgentUsage {
   cachedTokens: number;
 }
 
+export interface AgentCredits {
+  planId: string;
+  unlimited: boolean;
+  limitCredits: number;
+  usedCredits: number;
+  remainingCredits: number;
+  inputTokens: number;
+  outputTokens: number;
+  allowed: boolean;
+  reason: "ok" | "free" | "exhausted";
+}
+
 export interface AgentTurn {
   conversationId: string;
   reply: string;
   model: string;
   cacheHit: boolean;
   usage: AgentUsage;
+  credits: AgentCredits;
 }
 
 export const agentApi = {
   status: () => api.get<AgentStatus>("/api/v1/agent/status"),
+
+  credits: () =>
+    api.get<{ enabled: boolean; credits: AgentCredits }>("/api/v1/agent/credits"),
 
   conversations: () =>
     api.get<{ conversations: AgentConversation[] }>("/api/v1/agent/conversations"),

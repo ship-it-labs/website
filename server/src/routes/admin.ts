@@ -24,6 +24,13 @@ import {
   toCsv,
 } from "../services/admin.js";
 import { checkRateLimit } from "../services/rate-limit.js";
+import { accountBalance } from "../services/pollinations.js";
+import {
+  creditsFromTokens,
+  limitsForPlan,
+  periodStartDate,
+  platformUsage,
+} from "../services/ai-credits.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -49,6 +56,7 @@ const DB_TABLES: { name: string; description: string; columns: string }[] = [
   { name: "env_overrides", description: "DB-managed config (values never shown)", columns: "key, environment, updated_at" },
   { name: "admin_audit", description: "Admin action log", columns: "id, admin_id, action, target, detail, created_at" },
   { name: "error_events", description: "Failure log (API 5xx, client reports, crashes)", columns: "id, source, method, path, status_code, error_code, message, created_at" },
+  { name: "agent_usage", description: "Assistant credits used per user per month", columns: "user_id, period_start, input_tokens, output_tokens, cached_tokens, requests, cache_hits, updated_at" },
 ];
 
 const managerUrl = () => process.env.SERVER_MANAGER_URL || "http://manager:3001";
@@ -377,6 +385,70 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       },
       capacity,
     });
+  });
+
+  // Assistant credit usage for the current calendar month: platform totals and
+  // a per-user breakdown so admins can see who is burning the AI budget. Credits
+  // are derived from tokens, matching how the assistant meters each turn.
+  app.get("/admin/ai/usage", async (_req, reply) => {
+    const period = periodStartDate();
+    const totals = await platformUsage(supabase, period);
+
+    const { data: rows } = await supabase
+      .from("agent_usage")
+      .select("user_id, input_tokens, output_tokens, cached_tokens, requests, cache_hits")
+      .eq("period_start", period);
+    const usage = (rows ?? []) as {
+      user_id: string;
+      input_tokens: number;
+      output_tokens: number;
+      cached_tokens: number;
+      requests: number;
+      cache_hits: number;
+    }[];
+
+    const userIds = usage.map((row) => row.user_id);
+    let users: { id: string; email: string; plan_id: string; is_admin?: boolean | number | null }[] = [];
+    if (userIds.length > 0) {
+      const { data } = await supabase
+        .from("users")
+        .select("id, email, plan_id, is_admin")
+        .in("id", userIds);
+      users = (data ?? []) as typeof users;
+    }
+    const byId = new Map(users.map((user) => [user.id, user]));
+
+    const perUser = usage
+      .map((row) => {
+        const user = byId.get(row.user_id);
+        const limits = limitsForPlan(user?.plan_id);
+        const credits = creditsFromTokens(row.input_tokens + row.output_tokens);
+        const unlimited = Boolean(user?.is_admin);
+        return {
+          user_id: row.user_id,
+          email: user?.email ?? "(unknown)",
+          plan_id: user?.plan_id ?? "free",
+          unlimited,
+          requests: row.requests ?? 0,
+          cache_hits: row.cache_hits ?? 0,
+          input_tokens: row.input_tokens ?? 0,
+          output_tokens: row.output_tokens ?? 0,
+          cached_tokens: row.cached_tokens ?? 0,
+          credits_used: credits,
+          credits_limit: unlimited ? null : limits.credits,
+          credits_remaining: unlimited ? null : Math.max(0, limits.credits - credits),
+        };
+      })
+      .sort((a, b) => b.credits_used - a.credits_used);
+
+    return reply.send({ period, totals, per_user: perUser.slice(0, 100) });
+  });
+
+  // Live remaining pollen on the Pollinations account. Best-effort: the chat
+  // key may lack the usage scope, in which case this reports available:false
+  // with the reason instead of failing the page.
+  app.get("/admin/ai/balance", async (_req, reply) => {
+    return reply.send({ balance: await accountBalance() });
   });
 
   app.get("/admin/users", async (req, reply) => {

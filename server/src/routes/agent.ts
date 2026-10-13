@@ -4,10 +4,12 @@ import { authenticateApiKey } from "../middleware/auth.js";
 import { checkRateLimit } from "../services/rate-limit.js";
 import { AgentUnavailableError, agentEnabled, agentModels } from "../services/pollinations.js";
 import {
+  AiQuotaError,
   deleteConversation,
   getConversation,
   listConversations,
   reportProblem,
+  resolveEntitlement,
   sendMessage,
 } from "../services/agent-service.js";
 import { logger } from "../utils/logger.js";
@@ -32,6 +34,24 @@ async function requireUser(req: Parameters<typeof authenticateApiKey>[0], reply:
   return req.auth?.userId ?? null;
 }
 
+/** The paid-only / out-of-credits answer, with enough detail for the upsell. */
+function quotaExceeded(reply: Parameters<typeof authenticateApiKey>[1], err: AiQuotaError) {
+  const { entitlement } = err;
+  return reply.status(402).send({
+    error: {
+      code: err.reason === "free" ? "AI_UPGRADE_REQUIRED" : "AI_QUOTA_EXCEEDED",
+      message:
+        err.reason === "free"
+          ? "The AI assistant is available on the Pro and Ultra plans. Upgrade to start using it."
+          : "You have used all of your AI credits for this month. They reset at the start of your next billing period.",
+      plan_id: entitlement.planId,
+      limit_credits: entitlement.limitCredits,
+      used_credits: entitlement.usedCredits,
+      remaining_credits: entitlement.remainingCredits,
+    },
+  });
+}
+
 function unavailable(reply: Parameters<typeof authenticateApiKey>[1], err: AgentUnavailableError) {
   return reply.status(503).send({
     error: {
@@ -49,6 +69,15 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     enabled: agentEnabled(),
     models: agentModels(),
   }));
+
+  // The caller's own allowance: what the widget shows as "credits left" and
+  // uses to decide whether to render the chat or the upgrade prompt.
+  app.get("/agent/credits", async (req, reply) => {
+    const userId = await requireUser(req, reply);
+    if (!userId) return;
+    const credits = await resolveEntitlement(userId);
+    return reply.send({ enabled: agentEnabled(), credits });
+  });
 
   app.get("/agent/conversations", async (req, reply) => {
     const userId = await requireUser(req, reply);
@@ -116,6 +145,7 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
       const turn = await sendMessage(userId, parsed.data.conversation_id ?? null, parsed.data.message);
       return reply.send(turn);
     } catch (err) {
+      if (err instanceof AiQuotaError) return quotaExceeded(reply, err);
       if (err instanceof AgentUnavailableError) return unavailable(reply, err);
       logger.error({ err, userId }, "Assistant message failed");
       return reply
@@ -151,6 +181,11 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
         },
       });
     }
+
+    // The report surface lives inside the paid assistant, so it is paid-only
+    // too; the failure log and support email remain open to everyone.
+    const entitlement = await resolveEntitlement(userId);
+    if (!entitlement.allowed) return quotaExceeded(reply, new AiQuotaError(entitlement));
 
     try {
       await reportProblem(userId, parsed.data.summary, parsed.data.details, parsed.data.severity);

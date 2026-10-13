@@ -20,6 +20,13 @@ const BASE_URL = (process.env.POLLINATIONS_BASE_URL || "https://gen.pollinations
   ""
 );
 const API_KEY = (process.env.POLLINATIONS_API_KEY || "").trim();
+/**
+ * A second key that may carry the `account:usage` scope needed to read the
+ * pollen balance. The chat key often lacks it (the balance endpoint then
+ * answers 403), so the balance view falls back to this one and degrades to
+ * "unavailable" rather than failing the whole admin page.
+ */
+const ACCOUNT_KEY = (process.env.POLLINATIONS_ACCOUNT_KEY || "").trim() || API_KEY;
 const TIMEOUT_MS = Number(process.env.POLLINATIONS_TIMEOUT_MS || 45_000);
 
 const CACHEABLE = /gemini|claude|nova|anthropic/i;
@@ -162,7 +169,8 @@ function toWire(messages: AgentMessage[], cacheable: boolean): Record<string, un
 async function callModel(
   model: string,
   messages: AgentMessage[],
-  tools: ToolDefinition[]
+  tools: ToolDefinition[],
+  maxTokens?: number
 ): Promise<Attempt> {
   const body: Record<string, unknown> = {
     model,
@@ -172,6 +180,9 @@ async function callModel(
     body.tools = tools;
     body.tool_choice = "auto";
   }
+  // The per-tier output cap: the model is told how much it may generate so a
+  // single answer cannot spend a month's allowance.
+  if (maxTokens && maxTokens > 0) body.max_tokens = maxTokens;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
@@ -249,7 +260,7 @@ async function callModel(
  */
 export async function chatCompletion(
   messages: AgentMessage[],
-  options: { tools?: ToolDefinition[] } = {}
+  options: { tools?: ToolDefinition[]; maxTokens?: number } = {}
 ): Promise<AgentReply> {
   if (!agentEnabled()) {
     throw new AgentUnavailableError("No Pollinations API key is configured.", false, 0);
@@ -261,7 +272,7 @@ export async function chatCompletion(
   let sawLowBalance = false;
 
   for (const model of models) {
-    const attempt = await callModel(model, messages, tools);
+    const attempt = await callModel(model, messages, tools, options.maxTokens);
     if (attempt.ok) {
       if (failures.length > 0) {
         logger.info({ model, failures }, "Pollinations answered after fallback");
@@ -286,4 +297,58 @@ export async function chatCompletion(
 
 function attemptsCount(models: string[]): number {
   return models.length;
+}
+
+export interface PollinationsBalance {
+  available: boolean;
+  /** Remaining pollen, as reported by the account endpoint. */
+  balance: number | null;
+  /** Portion of the balance that is paid (not tier/quest pollen), if given. */
+  paid: number | null;
+  error?: string;
+}
+
+/**
+ * Reads the account's remaining pollen for the admin panel. Never throws: a
+ * missing scope (403 on the chat key), an outage, or a timeout all return
+ * `available: false` with a reason so the page shows "unavailable" instead of
+ * failing.
+ */
+export async function accountBalance(): Promise<PollinationsBalance> {
+  if (!ACCOUNT_KEY) {
+    return { available: false, balance: null, paid: null, error: "No account key configured" };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10_000);
+  try {
+    const response = await fetch(`${BASE_URL}/account/balance`, {
+      headers: { Authorization: `Bearer ${ACCOUNT_KEY}`, Accept: "application/json" },
+      signal: controller.signal,
+    });
+    if (!response.ok) {
+      return { available: false, balance: null, paid: null, error: `HTTP ${response.status}` };
+    }
+    const body = (await response.json()) as {
+      balance?: unknown;
+      accountBalance?: { total?: unknown; paid?: unknown };
+    };
+    const total =
+      typeof body.balance === "number"
+        ? body.balance
+        : typeof body.accountBalance?.total === "number"
+          ? body.accountBalance.total
+          : null;
+    const paid = typeof body.accountBalance?.paid === "number" ? body.accountBalance.paid : null;
+    return { available: total !== null, balance: total, paid };
+  } catch (err) {
+    return {
+      available: false,
+      balance: null,
+      paid: null,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
 }

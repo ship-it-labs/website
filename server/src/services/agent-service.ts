@@ -18,6 +18,12 @@ import {
   type AccountSnapshot,
 } from "./agent-context.js";
 import { getOrFill, hashKey, normalize } from "./agent-cache.js";
+import {
+  getEntitlement,
+  recordAiUsage,
+  type AiEntitlement,
+} from "./ai-credits.js";
+import { isAdminUser, type AdminUser } from "./admin.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -33,6 +39,46 @@ const CONTEXT_BUDGET_TOKENS = Number(process.env.AGENT_CONTEXT_TOKENS || 30_000)
 const MAX_HISTORY_MESSAGES = Number(process.env.AGENT_MAX_HISTORY || 24);
 const MAX_TOOL_ROUNDS = 4;
 const CACHE_TTL_MS = Number(process.env.AGENT_CACHE_TTL_MS || 30 * 60_000);
+
+/**
+ * Thrown when an account may not use the assistant: either the plan carries no
+ * credits at all (free) or the month's allowance is spent. The route turns this
+ * into a 402 with an upgrade hint rather than a generic failure, so the widget
+ * can show the "out of AI credits / upgrade" state.
+ */
+export class AiQuotaError extends Error {
+  readonly reason: "free" | "exhausted";
+  readonly entitlement: AiEntitlement;
+
+  constructor(entitlement: AiEntitlement) {
+    super(
+      entitlement.reason === "free"
+        ? "The assistant is a paid feature."
+        : "You have used all of this month's AI credits."
+    );
+    this.name = "AiQuotaError";
+    this.reason = entitlement.reason === "free" ? "free" : "exhausted";
+    this.entitlement = entitlement;
+  }
+}
+
+/** Loads the caller's plan + admin flag and computes their allowance. */
+export async function resolveEntitlement(userId: string): Promise<AiEntitlement> {
+  const { data } = await supabase
+    .from("users")
+    .select("id, email, plan_id, is_admin")
+    .eq("id", userId)
+    .maybeSingle();
+  const user = data as AdminUser | null;
+  const admin = user ? await isAdminUser(user) : false;
+  return getEntitlement(supabase, userId, user?.plan_id, admin);
+}
+
+/** Slices free text to roughly `maxTokens` tokens (≈4 characters each). */
+function capTextToTokens(text: string, maxTokens: number): string {
+  const maxChars = Math.max(1, maxTokens) * 4;
+  return text.length <= maxChars ? text : text.slice(0, maxChars);
+}
 
 const INSTRUCTIONS = `You are the Ship-It assistant, embedded in the Ship-It web app. You help the signed-in user understand their own account and use the platform.
 
@@ -202,11 +248,12 @@ interface ToolLoopResult {
 
 async function runToolLoop(
   messages: AgentMessage[],
-  ctx: ToolContext
+  ctx: ToolContext,
+  maxTokens: number
 ): Promise<ToolLoopResult> {
   const conversation = [...messages];
   let usedTools = false;
-  let reply = await chatCompletion(conversation, { tools: TOOLS });
+  let reply = await chatCompletion(conversation, { tools: TOOLS, maxTokens });
 
   for (let round = 0; round < MAX_TOOL_ROUNDS && reply.toolCalls.length > 0; round++) {
     usedTools = true;
@@ -231,7 +278,7 @@ async function runToolLoop(
       });
     }
 
-    reply = await chatCompletion(conversation, { tools: TOOLS });
+    reply = await chatCompletion(conversation, { tools: TOOLS, maxTokens });
   }
 
   return { reply, usedTools };
@@ -248,6 +295,8 @@ export interface AgentTurn {
   model: string;
   cacheHit: boolean;
   usage: AgentReply["usage"];
+  /** Credits state after this turn, so the widget can show what is left. */
+  credits: AiEntitlement;
 }
 
 export interface ConversationSummary {
@@ -315,7 +364,12 @@ export async function sendMessage(
     throw new AgentUnavailableError("No Pollinations API key is configured.", false, 0);
   }
 
-  const clean = text.trim().slice(0, 4000);
+  // Gate before any work: a free account or an exhausted one never reaches the
+  // model, and the over-budget input is trimmed to the tier's token cap.
+  const entitlement = await resolveEntitlement(userId);
+  if (!entitlement.allowed) throw new AiQuotaError(entitlement);
+
+  const clean = capTextToTokens(text.trim(), entitlement.inputTokens).slice(0, 4000);
   const convoId = await ensureConversation(userId, conversationId, clean);
 
   const history = await loadHistory(userId, convoId);
@@ -361,12 +415,12 @@ export async function sendMessage(
 
   if (sideEffect) {
     // Side-effecting turns bypass both cache tiers entirely.
-    reply = (await runToolLoop(trimmed, ctx)).reply;
+    reply = (await runToolLoop(trimmed, ctx, entitlement.outputTokens)).reply;
   } else {
     const result = await getOrFill(
       cacheKey,
       PRIMARY_MODEL,
-      async () => (await runToolLoop(trimmed, ctx)).reply.text,
+      async () => (await runToolLoop(trimmed, ctx, entitlement.outputTokens)).reply.text,
       { ttlMs: CACHE_TTL_MS, scope: "assistant" }
     );
     cacheHit = result.hit;
@@ -396,12 +450,35 @@ export async function sendMessage(
     .eq("id", convoId)
     .eq("user_id", userId);
 
+  // Meter the turn. Cache hits were charged nothing (their usage is zero) and
+  // admins are unlimited, so neither writes a row.
+  if (!entitlement.unlimited && !cacheHit) {
+    await recordAiUsage(supabase, userId, {
+      inputTokens: reply.usage.promptTokens,
+      outputTokens: reply.usage.completionTokens,
+      cachedTokens: reply.usage.cachedTokens,
+      cacheHit: false,
+    });
+  } else if (!entitlement.unlimited && cacheHit) {
+    await recordAiUsage(supabase, userId, {
+      inputTokens: 0,
+      outputTokens: 0,
+      cachedTokens: 0,
+      cacheHit: true,
+    });
+  }
+
+  const credits = entitlement.unlimited
+    ? entitlement
+    : await getEntitlement(supabase, userId, entitlement.planId, false);
+
   return {
     conversationId: convoId,
     reply: answer,
     model: reply.model,
     cacheHit,
     usage: reply.usage,
+    credits,
   };
 }
 

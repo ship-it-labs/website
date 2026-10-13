@@ -10,6 +10,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 function resetEnv(env: Record<string, string>): void {
   for (const key of [
     "POLLINATIONS_API_KEY",
+    "POLLINATIONS_ACCOUNT_KEY",
     "POLLINATIONS_MODEL",
     "POLLINATIONS_FALLBACK_MODELS",
     "POLLINATIONS_BASE_URL",
@@ -196,5 +197,77 @@ describe("pollinations prompt cache markers", () => {
     const body = bodyOf(capture.mock.calls[0] as unknown[]);
     const messages = body.messages as Array<{ content: unknown }>;
     expect(messages[0]?.content).toBe("STATIC\n\nDYN");
+  });
+});
+
+describe("pollinations output cap", () => {
+  it("sends the per-request max_tokens when one is given", async () => {
+    const mod = await load({ POLLINATIONS_API_KEY: "k", POLLINATIONS_MODEL: "a/one" });
+    const capture = vi.fn(async () =>
+      json({ choices: [{ message: { content: "ok" } }], usage: { total_tokens: 1 } })
+    );
+    vi.stubGlobal("fetch", capture);
+
+    await mod.chatCompletion([{ role: "user", content: "hi" }], { maxTokens: 600 });
+
+    expect(bodyOf(capture.mock.calls[0] as unknown[]).max_tokens).toBe(600);
+  });
+
+  it("omits max_tokens when none is given", async () => {
+    const mod = await load({ POLLINATIONS_API_KEY: "k", POLLINATIONS_MODEL: "a/one" });
+    const capture = vi.fn(async () =>
+      json({ choices: [{ message: { content: "ok" } }], usage: { total_tokens: 1 } })
+    );
+    vi.stubGlobal("fetch", capture);
+
+    await mod.chatCompletion([{ role: "user", content: "hi" }]);
+
+    expect(bodyOf(capture.mock.calls[0] as unknown[]).max_tokens).toBeUndefined();
+  });
+});
+
+describe("pollinations account balance", () => {
+  it("reads the balance from the account key", async () => {
+    const mod = await load({ POLLINATIONS_ACCOUNT_KEY: "acct", POLLINATIONS_API_KEY: "chat" });
+    const fetchMock = vi.fn(async (url: string, init: RequestInit) => {
+      expect(String(url)).toContain("/account/balance");
+      expect((init.headers as Record<string, string>).Authorization).toBe("Bearer acct");
+      return json({ balance: 1.239, accountBalance: { total: 1.239, paid: 0 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const balance = await mod.accountBalance();
+    expect(balance.available).toBe(true);
+    expect(balance.balance).toBe(1.239);
+    expect(balance.paid).toBe(0);
+  });
+
+  it("falls back to the chat key when no account key is set", async () => {
+    const mod = await load({ POLLINATIONS_API_KEY: "chat" });
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      expect((init.headers as Record<string, string>).Authorization).toBe("Bearer chat");
+      return json({ accountBalance: { total: 5 } });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const balance = await mod.accountBalance();
+    expect(balance.balance).toBe(5);
+  });
+
+  it("degrades to unavailable instead of throwing on a 403", async () => {
+    const mod = await load({ POLLINATIONS_API_KEY: "chat" });
+    vi.stubGlobal("fetch", vi.fn(async () => json({ error: "forbidden" }, 403)));
+
+    const balance = await mod.accountBalance();
+    expect(balance.available).toBe(false);
+    expect(balance.balance).toBeNull();
+    expect(balance.error).toContain("403");
+  });
+
+  it("reports unavailable with no key at all", async () => {
+    const mod = await load({ POLLINATIONS_API_KEY: "", POLLINATIONS_ACCOUNT_KEY: "" });
+    const balance = await mod.accountBalance();
+    expect(balance.available).toBe(false);
+    expect(balance.error).toBe("No account key configured");
   });
 });

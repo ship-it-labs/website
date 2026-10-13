@@ -4,6 +4,7 @@ import { authenticateApiKey } from "../middleware/auth.js";
 import { supabase } from "../db/index.js";
 import { logger } from "../utils/logger.js";
 import { resolveLanguage } from "../services/languages.js";
+import { resolveProjectId } from "../services/project-identity.js";
 import {
   parseEnvVars,
   encryptEnvVars,
@@ -86,8 +87,23 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     const sha256 = crypto.createHash("sha256").update(archive).digest("hex");
     const userId = req.auth!.userId;
 
+    // The requested id is the primary key, so a slug already owned by another
+    // account must never be written: that would move their project to us.
+    // Resolve to an account-scoped id in that one case; everything else keeps
+    // the requested id so re-uploads update in place. See project-identity.ts.
+    const { data: claim } = await supabase
+      .from("projects")
+      .select("user_id")
+      .eq("id", projectId)
+      .maybeSingle();
+    const resolvedId = resolveProjectId({
+      requestedId: projectId,
+      userId,
+      ownerId: (claim as { user_id?: string } | null)?.user_id ?? null,
+    });
+
     const uploadId = `up_${crypto.randomUUID().slice(0, 12)}`;
-    const storagePath = `${userId}/${projectId}/${uploadId}.zip`;
+    const storagePath = `${userId}/${resolvedId}/${uploadId}.zip`;
 
     const { error: uploadError } = await supabase.storage
       .from(BUCKET)
@@ -138,7 +154,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       const { data: prior } = await supabase
         .from("projects")
         .select("env_ciphertext")
-        .eq("id", projectId)
+        .eq("id", resolvedId)
         .eq("user_id", userId)
         .single();
       envCiphertext = (prior as { env_ciphertext?: string | null } | null)?.env_ciphertext ?? null;
@@ -174,9 +190,9 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
 
     const { error: projectError } = await supabase.from("projects").upsert(
       {
-        id: projectId,
+        id: resolvedId,
         user_id: userId,
-        name: projectName || projectId,
+        name: projectName || resolvedId,
         run_command: runCommand,
         language: resolved.language,
         env_ciphertext: envCiphertext,
@@ -199,12 +215,12 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     }
 
     logger.info(
-      { userId, projectId, uploadId, bytes: archive.length, language: resolved.language },
+      { userId, projectId, resolvedId, uploadId, bytes: archive.length, language: resolved.language },
       "Project uploaded"
     );
 
     return reply.status(201).send({
-      project_id: projectId,
+      project_id: resolvedId,
       upload_id: uploadId,
       sha256,
       filename,

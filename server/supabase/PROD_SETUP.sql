@@ -730,3 +730,29 @@ BEGIN
   EXCEPTION WHEN undefined_table THEN NULL;
   END;
 END $$;
+
+-- 0024: assistant credit accounting (one row per user per month).
+create table if not exists public.agent_usage (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references public.users(id) on delete cascade,
+  period_start date not null,
+  input_tokens bigint not null default 0,
+  output_tokens bigint not null default 0,
+  cached_tokens bigint not null default 0,
+  requests integer not null default 0,
+  cache_hits integer not null default 0,
+  cost_usd numeric(12, 6) not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  unique (user_id, period_start)
+);
+create index if not exists idx_agent_usage_period on public.agent_usage(period_start desc);
+create index if not exists idx_agent_usage_user on public.agent_usage(user_id, period_start desc);
+
+DO $$
+BEGIN
+  BEGIN
+    EXECUTE 'ALTER TABLE public.agent_usage NO FORCE ROW LEVEL SECURITY';
+  EXCEPTION WHEN undefined_table THEN NULL;
+  END;
+END $$;

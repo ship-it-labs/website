@@ -70,7 +70,7 @@ interface Plan {
   previous_price_cents: number | null;
 }
 
-type Section = "overview" | "users" | "runtimes" | "builds" | "payments" | "analytics" | "plans" | "settings" | "environment" | "database" | "webhooks" | "errors" | "audit" | "feedback";
+type Section = "overview" | "users" | "runtimes" | "builds" | "payments" | "analytics" | "ai" | "plans" | "settings" | "environment" | "database" | "webhooks" | "errors" | "audit" | "feedback";
 
 const SECTIONS: { id: Section; label: string }[] = [
   { id: "overview", label: "Overview" },
@@ -79,6 +79,7 @@ const SECTIONS: { id: Section; label: string }[] = [
   { id: "builds", label: "Builds" },
   { id: "payments", label: "Payments" },
   { id: "analytics", label: "Analytics" },
+  { id: "ai", label: "AI usage" },
   { id: "plans", label: "Plans" },
   { id: "settings", label: "Settings" },
   { id: "environment", label: "Environment" },
@@ -134,6 +135,7 @@ export function AdminPage() {
       {section === "builds" && <BuildsSection onError={setError} />}
       {section === "payments" && <PaymentsSection onError={setError} />}
       {section === "analytics" && <AnalyticsSection onError={setError} />}
+      {section === "ai" && <AiSection onError={setError} />}
       {section === "plans" && <PlansSection onError={setError} />}
       {section === "settings" && <SettingsSection onError={setError} />}
       {section === "environment" && <EnvironmentSection onError={setError} />}
@@ -309,6 +311,153 @@ function OverviewSection({ onError }: { onError: (message: string | null) => voi
 
       <div className="mt-6">
         <DiagnosticsPanel onError={onError} />
+      </div>
+    </>
+  );
+}
+
+interface AiBalance {
+  available: boolean;
+  balance: number | null;
+  paid: number | null;
+  error?: string;
+}
+
+interface AiUsageUser {
+  user_id: string;
+  email: string;
+  plan_id: string;
+  unlimited: boolean;
+  requests: number;
+  cache_hits: number;
+  input_tokens: number;
+  output_tokens: number;
+  cached_tokens: number;
+  credits_used: number;
+  credits_limit: number | null;
+  credits_remaining: number | null;
+}
+
+interface AiUsage {
+  period: string;
+  totals: {
+    users: number;
+    requests: number;
+    cacheHits: number;
+    inputTokens: number;
+    outputTokens: number;
+    cachedTokens: number;
+    credits: number;
+  };
+  per_user: AiUsageUser[];
+}
+
+/**
+ * Assistant credit usage and the Pollinations pollen balance. The balance is
+ * best-effort: when the configured key lacks the usage scope the tile reads
+ * "unavailable" with the reason rather than failing the whole section.
+ */
+function AiSection({ onError }: { onError: (message: string | null) => void }) {
+  const [usage, setUsage] = useState<AiUsage | null>(null);
+  const [balance, setBalance] = useState<AiBalance | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      const [usageResult, balanceResult] = await Promise.all([
+        api.get<AiUsage>("/api/v1/admin/ai/usage"),
+        api
+          .get<{ balance: AiBalance }>("/api/v1/admin/ai/balance")
+          .catch(() => ({ balance: null })),
+      ]);
+      setUsage(usageResult);
+      setBalance(balanceResult.balance);
+      onError(null);
+    } catch (err) {
+      onError(err instanceof Error ? err.message : "Could not load AI usage");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    load();
+    const timer = window.setInterval(load, 30_000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+
+  if (!usage) return <p className="text-sm text-zinc-500">Loading…</p>;
+
+  const balanceValue =
+    balance && balance.available && balance.balance !== null ? balance.balance.toFixed(4) : "—";
+  const balanceDetail =
+    !balance || !balance.available
+      ? (balance?.error ?? "unavailable")
+      : balance.paid !== null
+        ? `${balance.paid.toFixed(4)} paid`
+        : "live";
+
+  return (
+    <>
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatTile
+          label="Credits used"
+          value={String(usage.totals.credits)}
+          detail={`${usage.totals.users} accounts`}
+        />
+        <StatTile
+          label="Assistant requests"
+          value={String(usage.totals.requests)}
+          detail={`${usage.totals.cacheHits} cached`}
+        />
+        <StatTile
+          label="Tokens in / out"
+          value={`${usage.totals.inputTokens} / ${usage.totals.outputTokens}`}
+          detail={`${usage.totals.cachedTokens} cached`}
+        />
+        <StatTile label="Pollen balance" value={balanceValue} detail={balanceDetail} />
+      </div>
+
+      <div className="mt-6">
+        <Panel
+          title="Assistant usage this month"
+          description={`Period starting ${usage.period}. Credits are per account, per month.`}
+        >
+          {usage.per_user.length === 0 ? (
+            <EmptyState>No assistant usage this month.</EmptyState>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="text-xs uppercase tracking-wide text-zinc-500">
+                    <th className="py-2 pr-4">Account</th>
+                    <th className="py-2 pr-4">Plan</th>
+                    <th className="py-2 pr-4 text-right">Requests</th>
+                    <th className="py-2 pr-4 text-right">Tokens in / out</th>
+                    <th className="py-2 text-right">Credits</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/[0.06]">
+                  {usage.per_user.map((row) => (
+                    <tr key={row.user_id}>
+                      <td className="py-2 pr-4 text-zinc-300">{row.email}</td>
+                      <td className="py-2 pr-4 capitalize text-zinc-400">{row.plan_id}</td>
+                      <td className="py-2 pr-4 text-right font-mono text-zinc-400">
+                        {row.requests}
+                      </td>
+                      <td className="py-2 pr-4 text-right font-mono text-zinc-400">
+                        {row.input_tokens} / {row.output_tokens}
+                      </td>
+                      <td className="py-2 text-right font-mono text-zinc-300">
+                        {row.unlimited
+                          ? "unlimited"
+                          : `${row.credits_used} / ${row.credits_limit}`}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </Panel>
       </div>
     </>
   );

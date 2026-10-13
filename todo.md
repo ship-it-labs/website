@@ -81,6 +81,12 @@ relevant section whenever you finish something._
   Then re-run a Platform build to confirm the row flips to `success`/`failure`.
   `PUBLIC_BASE_URL`/`BUILD_REPORT_TOKEN` in the local root `.env` are **dev** values
   (`http://127.0.0.1:3000`) and must NOT be used for the repo secret.
+- **FIX (workflow, applied 2026-10-13):** the control plane returns 502 for ~30–60s on Render
+  cold start/restart, which was long enough to lose the source download, the bundle delivery and
+  the report POST (each only retried ~6s). `opencode-plugin/.github/workflows/build.yml` now
+  retries the source fetch, the bundle POST and the report POST with
+  `--retry 8 --retry-delay 5 --retry-max-time 120 --retry-all-errors --retry-connrefused`.
+  Repush/republish the workflow to take effect.
 - **Where to look (for reference):**
   - `server/src/routes/build-reports.ts` — the endpoint GitHub Actions calls back
     (`/api/v1/build-reports`) + shared-secret check.
@@ -98,6 +104,31 @@ relevant section whenever you finish something._
   (see §6). An expired PAT silently breaks polling.
 - **Acceptance:** when a workflow finishes, the build row flips to terminal within ~15s
   in the dashboard and via the plugin, with logs/artifacts attached.
+
+### BUG-C - Project uploads collide on name (cross-account overwrite)
+
+**Symptom:** project upload (dashboard + the plugin's `project_upload`/AI tools) keys on the
+project **name**, so two different accounts both having a project called `mini-app` overwrite
+each other. Worse, when one user already has `mini-app` and the AI runs an upload named
+`mini-app`, it clobbers their existing project instead of creating a new one.
+
+**Root cause (to confirm):** identity is the name rather than `(user_id, name)`; a re-upload is
+treated as "replace this name" with no user scoping, and the AI tool path does not check for an
+existing project owned by the same user before overwriting.
+
+**FIX (applied 2026-10-13):** the id is the primary key and is chosen by the caller, so the
+collision is on `projects.id`, not the display name. `POST /projects/upload` now looks up the
+requested id first; a slug already owned by another account resolves to a deterministic,
+account-scoped id (`<slug>--<8 hex of sha256(user_id)>`) via `services/project-identity.ts`,
+while an unclaimed slug or the owner's own slug keeps the requested id (so re-uploads still
+update in place). The response returns the resolved `project_id` and the plugin tool tells the
+model to reuse it for `build_submit`/`project_run`. Storage path uses the resolved id too.
+- [x] Scope every project write by ownership; never overwrite a project belonging to another user.
+- [x] Re-upload semantics: same account + same slug = explicit update (the tool's contract);
+      a foreign owner forces a distinct, stable scoped id.
+- [x] Migration `0025_project_identity.sql` + sqlite mirror: unique index on `(user_id, name)`
+      (guarded so pre-existing duplicates don't fail the migration).
+- [x] Tests: `tests/project-identity.test.ts` — two accounts, same slug, no shared id.
 
 ---
 
@@ -192,29 +223,26 @@ report surfaces), and each paid tier gets a **different amount of AI credits**. 
 **50 AI credits** — a "reasonable" amount — with **token caps per input and per output** so a
 single message can't burn a month's budget.
 
-**Scope:**
-- [ ] **Access gate:** `POST /agent/messages`, `/agent/report`, and the assistant widget are
-      **paid-only** (Pro/Ultra). Free users see an upsell instead of the chat. Decide whether
-      "and admin" means: admin routes stay role-gated (as today) *and* the assistant report
-      inbox is paid/admin-only — keep admin auth role-based, don't tie it to a paid plan.
-- [ ] **Per-tier credit table** (credits → tokens). Starting point:
-      - Pro → **50 credits / month**.
-      - Ultra → higher (e.g. 3–5× Pro) — pick a value.
-      - Free → **0** (no AI).
-      Define `1 credit = N tokens` (e.g. 1 credit ≈ 2k tokens) and store the table in one place
-      (config/service, mirrored to `plans`/tier config + admin panel so it's editable).
-- [ ] **Per-message caps:** hard `max_input_tokens` and `max_output_tokens` per request (reject
-      or truncate over-budget input; set `max_tokens` on the model call). Make them per-tier.
-- [ ] **Metering:** record tokens (prompt + completion, honouring `cached_tokens`) per user per
-      billing period inside `agent-service`; decrement credits; reset monthly. Reuse the
-      existing usage/quota patterns (§9 "Tiers").
-- [ ] **Enforcement:** over the cap → `402`/`429` with a clear "out of AI credits" message +
-      tier upgrade CTA; never silently truncate a paid user's answer without telling them.
-- [ ] **Cache interaction:** cache hits should **not** charge credits (or charge a reduced
-      amount) — decide and document.
-- [ ] **Admin:** surface per-user AI credit usage (used / remaining) in the admin panel.
-- [ ] Tests: gate (free blocked, pro allowed), cap enforcement (input/output), monthly reset,
-      cache-hit free. Run `pnpm verify`.
+**IMPLEMENTED 2026-10-13 (verify green).** Service `services/ai-credits.ts`, migration
+`0024_agent_usage.sql` + sqlite `agent_usage`, gating in `agent-service.ts` / `routes/agent.ts`,
+`pollinations.ts` `maxTokens` + `accountBalance()`, admin `GET /admin/ai/usage` +
+`GET /admin/ai/balance`, widget credits + 402 upsell, admin `AiSection`. Env:
+`POLLINATIONS_ACCOUNT_KEY`, `AI_TOKENS_PER_CREDIT`, `AI_CREDITS_PRO`, `AI_CREDITS_ULTRA` added to
+`.env` files + `.env.example`.
+- [x] **Access gate:** `POST /agent/messages`, `/agent/report`, the widget are paid-only
+      (Pro/Ultra); free → 402 `AI_UPGRADE_REQUIRED` with an upsell. Admin routes stay role-gated;
+      admins are unlimited, not plan-tied.
+- [x] **Per-tier credit table:** Free 0, Pro 50 (`AI_CREDITS_PRO`), Ultra 200 (`AI_CREDITS_ULTRA`);
+      `1 credit = AI_TOKENS_PER_CREDIT` tokens (default 10 000). One source: `ai-credits.ts`.
+- [x] **Per-message caps:** per-tier `inputTokens`/`outputTokens`; input capped via
+      `capTextToTokens`, output via the model's `max_tokens`.
+- [x] **Metering:** tokens (prompt + completion, honouring `cached_tokens`) recorded per user per
+      calendar month in `agent_usage`; credits derived in code; resets monthly.
+- [x] **Enforcement:** over the cap → 402 `AI_QUOTA_EXCEEDED` + upgrade CTA.
+- [x] **Cache interaction:** cache hits do **not** charge credits; still counted for admin totals.
+- [x] **Admin:** `AiSection` shows credits used, requests, tokens, pollen balance + per-user table.
+- [x] Tests: `tests/ai-credits.test.ts` (gate, metering, exhaustion, cache-hit free, platform
+      totals) + `tests/pollinations.test.ts` (`max_tokens`, `accountBalance` graceful). Verified.
 
 ---
 
