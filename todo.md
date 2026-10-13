@@ -163,7 +163,7 @@ account, (b) knows the Ship-It docs, (c) can file a problem report to the admin,
 `qwen/qwen3.7-flash` under a <32k context, (e) persists conversation history, and (f) has
 very aggressive input+output caching.
 
-**Written this session (uncommitted as of this file):**
+**Built and committed (backend `88e04f5`, frontend `4797fba`; `pnpm verify` green):**
 - `server/supabase/migrations/0023_agent_assistant.sql` — `agent_conversations`,
   `agent_messages`, `agent_cache` + NO FORCE RLS block.
 - `server/supabase/PROD_SETUP.sql` — appended the 0023 body **and** a 0022
@@ -252,8 +252,10 @@ single message can't burn a month's budget.
   - `0022_error_events` (already provided) — fixes `PGRST205: relation public.error_events
     does not exist` seen in prod logs.
   - `0023_agent_assistant` — new agent tables.
-  - Or just run the updated **`PROD_SETUP.sql`** end-to-end (it now includes 0022 + 0023 and
-    the NO-FORCE-RLS lift for all three agent tables + `error_events`).
+  - `0024_agent_usage` — assistant credit accounting (`agent_usage`).
+  - `0025_project_identity` — unique `(user_id, name)` on `projects` (BUG-C).
+  - Or just run the updated **`PROD_SETUP.sql`** end-to-end (it mirrors 0022–0024 plus the
+    NO-FORCE-RLS lift for every service-role-written table).
 - [ ] **RLS / 42501 (user is fixing):** prod logs show
   `new row violates row-level security policy for table "builds"` on `POST /api/v1/builds`.
   `0018_no_force_rls.sql` already lists `public.builds`, but the live DB is forcing RLS
@@ -262,7 +264,8 @@ single message can't burn a month's budget.
   FORCE is set**.
 - [ ] After migrations, confirm Supabase's schema cache reloads (PGRST caches schema; a
       `NOTIFY pgrst, 'reload schema'` or a project restart clears it).
-- Migrations currently through `0023`. `PROD_SETUP.sql` mirrors them.
+- Migrations authored through `0025` (`0024_agent_usage`, `0025_project_identity`). New ones
+  still need running in prod; `PROD_SETUP.sql` mirrors them.
 
 ---
 
@@ -370,7 +373,8 @@ probabilistically (~2%); `/client-errors` 30/min per IP; attribution fail-open a
    build after the secret/env match (see §0).
 3. **RLS 42501 + migrations 0022/0023** (prod writes failing; agent tables missing).
 4. **Render redeploy** of the agent commit.
-5. Finish agent frontend + the two missing test files; `pnpm verify`; commit.
+5. ~~Finish agent frontend + the two missing test files; `pnpm verify`; commit.~~ — **DONE**
+   (assistant committed `4797fba`; AI-credit + project-identity tests added; `pnpm verify` green).
 6. Whop reconcile / webhook replay / dashboard config.
 7. Plugin 1.2.3 publish.
 8. Rotate secrets.
