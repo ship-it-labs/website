@@ -90,16 +90,32 @@ export function docsDigest(): string {
   return DOC_SECTIONS.map((section) => `## ${section.title}\n${section.body}`).join("\n\n");
 }
 
+/** Common words that would otherwise match everything and drown the signal. */
+const STOPWORDS = new Set([
+  "the", "and", "for", "what", "how", "does", "did", "with", "that", "this",
+  "you", "your", "are", "was", "were", "not", "but", "can", "could", "all",
+  "out", "why", "when", "which", "into", "from", "have", "has", "had", "about",
+  "its", "it", "is", "do", "of", "to", "in", "on", "my", "me", "we", "our",
+  "get", "got", "use", "using", "there", "here", "then", "than", "them", "they",
+  "much", "many", "any", "one", "two", "who", "where", "will", "would", "should",
+]);
+
 /**
  * Keyword search over the sections, cheapest-first: a term in the title beats a
- * term in the body. Returns the best `limit` sections, or the overview when
- * nothing matches so a tool call never comes back empty.
+ * term in the body. Stopwords are dropped so a phrasing like "how much do the
+ * plans cost" scores on "plans" and "cost", not on "the". Returns the best
+ * `limit` sections, or the overview when nothing matches so a tool call never
+ * comes back empty.
  */
 export function searchDocs(query: string, limit = 3): DocSection[] {
-  const terms = query
-    .toLowerCase()
-    .split(/[^a-z0-9_]+/)
-    .filter((term) => term.length > 2);
+  const terms = [
+    ...new Set(
+      query
+        .toLowerCase()
+        .split(/[^a-z0-9_]+/)
+        .filter((term) => term.length > 2 && !STOPWORDS.has(term))
+    ),
+  ];
 
   if (terms.length === 0) return DOC_SECTIONS.slice(0, 1);
 

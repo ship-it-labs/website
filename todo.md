@@ -1,6 +1,6 @@
 # Ship-It — Master TODO & Work Log
 
-_Last updated: 2026-10-12. Owner: ymonz. This file is the single source of truth for
+_Last updated: 2026-10-13. Owner: ymonz. This file is the single source of truth for
 what's done, what's in flight, and what's broken. Update the "Last updated" line and the
 relevant section whenever you finish something._
 
@@ -117,24 +117,25 @@ very aggressive input+output caching.
   rate limits; maps `AgentUnavailableError` → `503 AGENT_UNAVAILABLE`.
 - `server/src/index.ts` — registered `agentRoutes` under `/api/v1`.
 - `server/tests/agent-cache.test.ts` — cache key/LRU/TTL/single-flight/failure tests.
-- **Server `tsc --noEmit` is clean** with all of the above.
+- `server/tests/pollinations.test.ts` — fallback past a low-balance 200, cache-marker
+  boundary, tool-call parsing, typed low-balance failure (7 tests).
+- `server/tests/agent-context.test.ts` — `estimateTokens`, `snapshotText`, `trimToBudget`,
+  `searchDocs` (8 tests).
+- `src/lib/agent.ts` — browser client (status/conversations/conversation/send/report).
+- `src/components/site/AssistantWidget.tsx` — floating panel: chat, thread history, direct
+  report form, cached badge, model label; mounted in `App.tsx` `Root` inside `AuthProvider`
+  and outside `RouteRoot`; renders only when signed in.
+- **`pnpm verify` passes: ESLint + tsc (web) + tsc (server) + vitest, all 4 gates green.**
 
 **Still to do for the agent:**
-- [ ] **Frontend** `src/lib/agent.ts` (API wrappers) + `src/components/site/AssistantWidget.tsx`
-      (floating chat panel: conversation list, message thread, input, typing state, cache
-      indicator, report button). Mount inside `AuthProvider` (so it can `useAuth`) and
-      inside the Router (so it can read the current path). Only render when signed in.
-- [ ] Add an "Ask AI" entry point in site nav (optional).
+- [ ] Add an "Ask AI" entry point in site nav (optional; the floating button is the entry).
 - [ ] Optionally surface agent reports in a dedicated admin view (currently they land in the
       existing `feedback` inbox prefixed `[Assistant report · <severity>]`).
-- [ ] Tests: `tests/pollinations.test.ts` (fallback past a low-balance 200, cache markers,
-      tool-call parsing, all-models-fail) and `tests/agent-context.test.ts`
-      (`estimateTokens`, `snapshotText`, `trimToBudget`, `searchDocs`). **NOT WRITTEN YET.**
-- [ ] Run `pnpm verify`, then commit.
 - [ ] Confirm the chosen primary model. `qwen/qwen3.7-flash` currently returns HTTP 200 with
       "doesn't have enough credits / needs paid Pollen" on this account; working models are
       `openai/gpt-5.4-nano` and `openai/gpt-oss-20b` (set as fallbacks). Either top up pollen
       or keep the fallback order.
+- [ ] Run migration `0023` in prod (see §3) before the assistant works against Supabase.
 
 **Design notes (keep these invariants):**
 - Static docs prefix is byte-stable and carries the `cache_control` marker; the dynamic

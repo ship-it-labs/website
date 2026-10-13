@@ -24,6 +24,7 @@ import { DocsPage } from "@/pages/docs";
 import { TermsPage } from "@/pages/terms";
 import { NotFoundPage } from "@/pages/not-found";
 import { RouteRoot } from "@/components/site/RouteErrorBoundary";
+import { AssistantWidget } from "@/components/site/AssistantWidget";
 
 function Protected({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
@@ -117,6 +118,9 @@ export function Root() {
         <RouteRoot>
           <App />
         </RouteRoot>
+        {/* Outside RouteRoot so a page crash never takes the assistant with it,
+            and inside AuthProvider so it can read the signed-in user. */}
+        <AssistantWidget />
       </AuthProvider>
     </BrowserRouter>
   );
