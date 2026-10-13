@@ -74,9 +74,10 @@ relevant section whenever you finish something._
 - **FIX (config, prod):** on `ship-it-labs/opencode-plugin` set
   - repo **variable** `PLATFORM_API_URL = https://ship-it-fri1.onrender.com` — **[DONE]**
     set via the GitHub API on 2026-10-13.
-  - repo **secret** `BUILD_REPORT_TOKEN = <same value as the prod (Render) control plane's
-    BUILD_REPORT_TOKEN>` — **[PENDING, user]**: `gh secret set BUILD_REPORT_TOKEN
-    --repo ship-it-labs/opencode-plugin`.
+  - repo **secret** `BUILD_REPORT_TOKEN` — **[DONE]** set via the GitHub API on 2026-10-13
+    (value `Husseinmonzer123`). **The Render control-plane service must have the same
+    `BUILD_REPORT_TOKEN`** or the report POST returns 401. This value is weak/reused and is
+    already on the rotation list (§6) — rotate it in both places together.
   Then re-run a Platform build to confirm the row flips to `success`/`failure`.
   `PUBLIC_BASE_URL`/`BUILD_REPORT_TOKEN` in the local root `.env` are **dev** values
   (`http://127.0.0.1:3000`) and must NOT be used for the repo secret.
@@ -335,9 +336,10 @@ probabilistically (~2%); `/client-errors` 30/min per IP; attribution fail-open a
    (agent advertised `127.0.0.1:10000`), code fix in `server-agent/cmd/agent/main.go`
    (`SELF_URL` → `RENDER_EXTERNAL_URL` → loopback), `go build` passes. **Requires an agent
    redeploy** and ideally `SELF_URL=https://server-agent1-ship-it.onrender.com` set explicitly.
-2. **BUG-B** (build stuck "running" — blocking trust in builds/tools) — **root cause
-   confirmed**: missing repo var/secret on `ship-it-labs/opencode-plugin`. Set
-   `PLATFORM_API_URL` + `BUILD_REPORT_TOKEN` (see §0).
+2. **BUG-B** (build stuck "running" — blocking trust in builds/tools) — **config applied**:
+   repo variable `PLATFORM_API_URL` + repo secret `BUILD_REPORT_TOKEN` set on
+   `ship-it-labs/opencode-plugin` (must match Render's env). Verify with a fresh Platform
+   build after the secret/env match (see §0).
 3. **RLS 42501 + migrations 0022/0023** (prod writes failing; agent tables missing).
 4. **Render redeploy** of the agent commit.
 5. Finish agent frontend + the two missing test files; `pnpm verify`; commit.
