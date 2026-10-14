@@ -47,6 +47,7 @@ class TableQuery implements PromiseLike<QueryResult> {
   private orderColumn: string | null = null;
   private orderAscending = true;
   private limitCount: number | null = null;
+  private offsetCount: number | null = null;
   private singleMode = false;
   private conflictTarget: string | null = null;
   private returningColumns: string | null = null;
@@ -147,6 +148,17 @@ class TableQuery implements PromiseLike<QueryResult> {
     return this;
   }
 
+  /** Mirrors PostgREST `.range(from, to)` (inclusive): the page starting at
+   * row `from` through row `to`. Lets paginated endpoints run the identical
+   * query against node:sqlite and Supabase. */
+  range(from: number, to: number): this {
+    const start = Math.max(0, Math.floor(from));
+    const end = Math.max(start, Math.floor(to));
+    this.offsetCount = start;
+    this.limitCount = end - start + 1;
+    return this;
+  }
+
   single(): this {
     this.singleMode = true;
     return this;
@@ -228,6 +240,9 @@ class TableQuery implements PromiseLike<QueryResult> {
     }
     if (this.limitCount !== null) {
       sql += ` limit ${Number(this.limitCount)}`;
+      if (this.offsetCount !== null && this.offsetCount > 0) {
+        sql += ` offset ${Number(this.offsetCount)}`;
+      }
     } else if (this.singleMode) {
       sql += " limit 2";
     }

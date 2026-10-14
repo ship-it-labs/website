@@ -1,20 +1,10 @@
-import crypto from "node:crypto";
 import { FastifyInstance } from "fastify";
 import { authenticateApiKey } from "../middleware/auth.js";
-import { supabase } from "../db/index.js";
 import { logger } from "../utils/logger.js";
-import { resolveLanguage } from "../services/languages.js";
-import { resolveProjectId } from "../services/project-identity.js";
-import {
-  parseEnvVars,
-  encryptEnvVars,
-  projectEnvKey,
-  EnvConfigError,
-  EnvCryptoError,
-} from "../utils/env-crypto.js";
+import { finalizeProjectUpload } from "../services/upload-finalize.js";
+import { paginateTable, parsePageParams } from "../utils/pagination.js";
 
 const MAX_UPLOAD_BYTES = 400 * 1024 * 1024;
-const BUCKET = "project-uploads";
 
 export async function projectRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authenticateApiKey);
@@ -84,168 +74,44 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const sha256 = crypto.createHash("sha256").update(archive).digest("hex");
-    const userId = req.auth!.userId;
-
-    // The requested id is the primary key, so a slug already owned by another
-    // account must never be written: that would move their project to us.
-    // Resolve to an account-scoped id in that one case; everything else keeps
-    // the requested id so re-uploads update in place. See project-identity.ts.
-    const { data: claim } = await supabase
-      .from("projects")
-      .select("user_id")
-      .eq("id", projectId)
-      .maybeSingle();
-    const resolvedId = resolveProjectId({
+    // The metadata tail (identity, storage, language, env, database) lives in
+    // the shared finalize service so the edge's internal endpoint performs
+    // the identical steps for staged bytes.
+    const outcome = await finalizeProjectUpload({
+      userId: req.auth!.userId,
       requestedId: projectId,
-      userId,
-      ownerId: (claim as { user_id?: string } | null)?.user_id ?? null,
-    });
-
-    const uploadId = `up_${crypto.randomUUID().slice(0, 12)}`;
-    const storagePath = `${userId}/${resolvedId}/${uploadId}.zip`;
-
-    const { error: uploadError } = await supabase.storage
-      .from(BUCKET)
-      .upload(storagePath, archive, {
-        contentType: "application/zip",
-        upsert: false,
-      });
-
-    if (uploadError) {
-      logger.error({ err: uploadError, userId, projectId }, "Storage upload failed");
-      return reply.status(502).send({
-        error: { code: "STORAGE_UNAVAILABLE", message: "Failed to store the project archive" },
-      });
-    }
-
-    const { data: signed, error: signError } = await supabase.storage
-      .from(BUCKET)
-      .createSignedUrl(storagePath, 60 * 30);
-
-    if (signError || !signed?.signedUrl) {
-      logger.error({ err: signError, userId, projectId }, "Failed to sign upload URL");
-      return reply.status(502).send({
-        error: { code: "STORAGE_UNAVAILABLE", message: "Failed to sign the project archive" },
-      });
-    }
-
-    const now = new Date().toISOString();
-
-    // The AI declares the language; the archive contents arbitrate. A wrong
-    // declaration would otherwise send the project to a toolchain that cannot
-    // build it, and the failure would surface minutes later in CI.
-    const resolved = resolveLanguage(
-      declaredLanguage || undefined,
-      manifest?.files ?? []
-    );
-    if (resolved.note) {
-      logger.info(
-        { userId, projectId, note: resolved.note },
-        "Upload language resolved by detection"
-      );
-    }
-
-    // A re-upload without env keeps the previous env: wiping secrets because
-    // a later upload omitted the field would be a silent, baffling breakage.
-    // An explicit env (even {}) replaces it.
-    let envCiphertext: string | null | undefined;
-    if (envRaw === null) {
-      const { data: prior } = await supabase
-        .from("projects")
-        .select("env_ciphertext")
-        .eq("id", resolvedId)
-        .eq("user_id", userId)
-        .single();
-      envCiphertext = (prior as { env_ciphertext?: string | null } | null)?.env_ciphertext ?? null;
-    } else if (envRaw.trim() === "") {
-      envCiphertext = null;
-    } else {
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(envRaw);
-      } catch {
-        return reply.status(400).send({
-          error: { code: "VALIDATION_ERROR", message: "env must be a JSON object" },
-        });
-      }
-      try {
-        const vars = parseEnvVars(parsed);
-        envCiphertext = encryptEnvVars(vars, projectEnvKey());
-      } catch (err) {
-        if (err instanceof EnvConfigError) {
-          logger.error({ userId, projectId }, "Project env submitted without PROJECT_ENV_KEY");
-          return reply.status(500).send({
-            error: { code: "ENV_NOT_CONFIGURED", message: "Project environments are not enabled on this deployment" },
-          });
-        }
-        return reply.status(400).send({
-          error: {
-            code: "VALIDATION_ERROR",
-            message: err instanceof EnvCryptoError ? err.message : "Invalid env",
-          },
-        });
-      }
-    }
-
-    const { error: projectError } = await supabase.from("projects").upsert(
-      {
-        id: resolvedId,
-        user_id: userId,
-        name: projectName || resolvedId,
-        run_command: runCommand,
-        language: resolved.language,
-        env_ciphertext: envCiphertext,
-        upload_id: uploadId,
-        upload_path: storagePath,
-        upload_url: signed.signedUrl,
-        upload_sha256: sha256,
-        upload_bytes: archive.length,
-        file_count: manifest?.files?.length ?? 0,
-        updated_at: now,
-      },
-      { onConflict: "id" }
-    );
-
-    if (projectError) {
-      logger.error({ err: projectError, userId, projectId }, "Project record upsert failed");
-      return reply.status(500).send({
-        error: { code: "INTERNAL_ERROR", message: "Failed to record the project upload" },
-      });
-    }
-
-    logger.info(
-      { userId, projectId, resolvedId, uploadId, bytes: archive.length, language: resolved.language },
-      "Project uploaded"
-    );
-
-    return reply.status(201).send({
-      project_id: resolvedId,
-      upload_id: uploadId,
-      sha256,
+      projectName,
+      runCommand,
+      declaredLanguage,
+      envRaw,
+      manifest,
       filename,
-      language: resolved.language,
-      language_note: resolved.note,
-      file_count: manifest?.files?.length ?? 0,
-      total_bytes: archive.length,
-      excluded: manifest?.excluded ?? [],
+      store: { kind: "buffer", data: archive },
     });
+    return reply.status(outcome.status).send(outcome.body);
   });
 
   app.get("/projects", async (req, reply) => {
-    const { data, error } = await supabase
-      .from("projects")
-      .select("id, name, upload_id, upload_sha256, upload_bytes, file_count, created_at, updated_at")
-      .eq("user_id", req.auth!.userId)
-      .order("created_at", { ascending: false });
-
-    if (error) {
+    // Paginated, but the `projects` key stays: the OpenCode plugin reads it,
+    // and the plugin contract is frozen. New clients also get total/page/limit.
+    const page = parsePageParams(req.query);
+    const userId = req.auth!.userId;
+    try {
+      const { items, total } = await paginateTable({
+        table: "projects",
+        columns: "id, name, upload_id, upload_sha256, upload_bytes, file_count, created_at, updated_at",
+        orderBy: "created_at",
+        ascending: false,
+        page,
+        applyFilters: (q) => q.eq("user_id", userId),
+      });
+      return reply.send({ projects: items, total, page: page.page, limit: page.limit });
+    } catch (err) {
+      logger.error({ err, userId }, "Failed to list projects");
       return reply.status(500).send({
         error: { code: "INTERNAL_ERROR", message: "Failed to list projects" },
       });
     }
-
-    return reply.send({ projects: data ?? [] });
   });
 }
 

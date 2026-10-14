@@ -32,6 +32,7 @@ import {
   platformUsage,
 } from "../services/ai-credits.js";
 import { logger } from "../utils/logger.js";
+import { paginateTable, parsePageParams } from "../utils/pagination.js";
 
 /**
  * Tables the database console may browse. Credentials and raw secrets never
@@ -456,37 +457,43 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     // drivers share one code path (the stand-in has no ilike method, and LIKE
     // is ASCII case-insensitive in SQLite while emails are stored lowercase).
     const q = ((req.query as { q?: string }).q ?? "").trim().toLowerCase();
-    let query = supabase
-      .from("users")
-      .select("id, email, plan_id, is_admin, is_active, created_at")
-      .order("created_at", { ascending: false })
-      .limit(500);
-    if (q) query = query.like("email", `%${q}%`);
+    const page = parsePageParams(req.query);
 
-    const { data, error } = await query;
-
-    if (error) {
-      return reply.status(500).send({
-        error: { code: "INTERNAL_ERROR", message: "Failed to list users" },
-      });
-    }
-
-    const users = (data ?? []) as {
+    type UserRow = {
       id: string;
       email: string;
       plan_id: string;
       is_admin?: boolean | number | null;
       created_at?: string;
-    }[];
+    };
+    let items: UserRow[];
+    let total: number;
+    try {
+      const res = await paginateTable<UserRow>({
+        table: "users",
+        columns: "id, email, plan_id, is_admin, is_active, created_at",
+        orderBy: "created_at",
+        ascending: false,
+        page,
+        applyFilters: (qq) => (q ? qq.like("email", `%${q}%`) : qq),
+      });
+      items = res.items;
+      total = res.total;
+    } catch (err) {
+      logger.error({ err }, "Failed to list users");
+      return reply.status(500).send({
+        error: { code: "INTERNAL_ERROR", message: "Failed to list users" },
+      });
+    }
 
     // The flag alone is not the whole story: bootstrap and first-user admins
     // resolve at request time, so each row is evaluated the same way the guard
-    // evaluates the caller.
+    // evaluates the caller. Paginated first, so enrichment touches one page.
     const enriched = await Promise.all(
-      users.map(async (user) => ({ ...user, is_admin: await isAdminUser(user) }))
+      items.map(async (user) => ({ ...user, is_admin: await isAdminUser(user) }))
     );
 
-    return reply.send({ users: enriched });
+    return reply.send({ users: enriched, total, page: page.page, limit: page.limit });
   });
 
   app.get("/admin/users/export", async (req, reply) => {
@@ -525,22 +532,23 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   // filter narrows server-side; the panel also filters client-side for instant
   // switching between actions without refetching.
   app.get("/admin/audit", async (req, reply) => {
-    const limit = Math.min(200, Math.max(1, Number((req.query as { limit?: string }).limit) || 100));
+    const page = parsePageParams(req.query);
     const action = (req.query as { action?: string }).action;
     try {
-      const { data, error } = await supabase
-        .from("admin_audit")
-        .select("id, admin_id, action, target, detail, created_at")
-        .order("created_at", { ascending: false })
-        .limit(limit);
-      if (error) {
-        logger.warn({ err: error }, "Admin audit table unreadable; returning empty log");
-        return reply.send({ entries: [], actions: [], pending_migration: true });
-      }
-      const rows = (data ?? []) as AuditRow[];
+      const { items, total } = await paginateTable<AuditRow>({
+        table: "admin_audit",
+        columns: "id, admin_id, action, target, detail, created_at",
+        orderBy: "created_at",
+        ascending: false,
+        page,
+        applyFilters: (q) => (action ? q.eq("action", action) : q),
+      });
       return reply.send({
-        entries: filterAuditEntries(rows, action),
-        actions: auditActions(rows),
+        entries: filterAuditEntries(items, action),
+        total,
+        page: page.page,
+        limit: page.limit,
+        actions: auditActions(items),
         pending_migration: false,
       });
     } catch (err) {
@@ -556,12 +564,13 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   // answers "is the site on fire right now".
   app.get("/admin/errors", async (req, reply) => {
     const query = req.query as {
+      page?: string;
       limit?: string;
       source?: string;
       status?: string;
       search?: string;
     };
-    const limit = Math.min(200, Math.max(1, Number(query.limit) || 100));
+    const page = parsePageParams(req.query);
     const source = (query.source ?? "").trim();
     const status = Number(query.status);
     const search = (query.search ?? "").trim().slice(0, 100);
@@ -578,41 +587,40 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     }
 
     try {
-      let rows = supabase
-        .from("error_events")
-        .select("id, source, method, path, status_code, error_code, message, user_id, request_id, created_at")
-        .order("created_at", { ascending: false })
-        .limit(limit);
-      if (source) rows = rows.eq("source", source);
-      if (query.status) rows = rows.eq("status_code", status);
-      if (search) rows = rows.like("message", `%${search}%`);
+      const applyFilters = (q: any) => {
+        let out = q;
+        if (source) out = out.eq("source", source);
+        if (query.status) out = out.eq("status_code", status);
+        if (search) out = out.like("message", `%${search}%`);
+        return out;
+      };
+      const { items, total } = await paginateTable({
+        table: "error_events",
+        columns: "id, source, method, path, status_code, error_code, message, user_id, request_id, created_at",
+        orderBy: "created_at",
+        ascending: false,
+        page,
+        applyFilters,
+      });
 
       const dayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
-      const [listed, recent] = await Promise.all([
-        rows,
-        supabase
-          .from("error_events")
-          .select("source, status_code")
-          .gte("created_at", dayAgo)
-          .limit(2000),
-      ]);
-
-      if (listed.error) {
-        logger.warn({ err: listed.error }, "Error-events table unreadable; returning empty log");
-        return reply.send({ entries: [], stats: null, pending_migration: true });
-      }
+      const { data: recent } = await supabase
+        .from("error_events")
+        .select("source, status_code")
+        .gte("created_at", dayAgo)
+        .limit(2000);
 
       // Aggregates in code, not SQL: the local SQLite stand-in has no GROUP
       // BY parity, and two thousand small rows are cheap to fold here.
       const stats = { total_24h: 0, by_source: {} as Record<string, number>, by_status: {} as Record<string, number> };
-      for (const row of ((recent.data ?? []) as { source?: string; status_code?: number | null }[])) {
+      for (const row of ((recent ?? []) as { source?: string; status_code?: number | null }[])) {
         stats.total_24h += 1;
         if (row.source) stats.by_source[row.source] = (stats.by_source[row.source] ?? 0) + 1;
         const key = row.status_code == null ? "client" : String(row.status_code);
         stats.by_status[key] = (stats.by_status[key] ?? 0) + 1;
       }
 
-      return reply.send({ entries: listed.data ?? [], stats, pending_migration: false });
+      return reply.send({ entries: items, total, page: page.page, limit: page.limit, stats, pending_migration: false });
     } catch (err) {
       logger.warn({ err }, "Error-events table unreadable; returning empty log");
       return reply.send({ entries: [], stats: null, pending_migration: true });
@@ -843,8 +851,15 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     }
 
     // Owner emails are joined here rather than per row: one query for every
-    // distinct owner no matter how many runtimes they run.
-    const ownerIds = [...new Set(runtimes.map((r) => r.user_id).filter(Boolean))] as string[];
+    // distinct owner no matter how many runtimes they run. The orchestrator
+    // owns this list (not the database), so pagination slices in code after
+    // the join; runtimes are live processes, few enough that the slice is the
+    // payload saver, not a memory saver.
+    const page = parsePageParams(req.query);
+    const total = runtimes.length;
+    const slice = runtimes.slice(page.offset, page.offset + page.limit);
+
+    const ownerIds = [...new Set(slice.map((r) => r.user_id).filter(Boolean))] as string[];
     let emails: Record<string, string> = {};
     if (ownerIds.length > 0) {
       const { data } = await supabase.from("users").select("id, email").in("id", ownerIds);
@@ -854,10 +869,13 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return reply.send({
-      runtimes: runtimes.map((runtime) => ({
+      runtimes: slice.map((runtime) => ({
         ...runtime,
         owner_email: emails[runtime.user_id as string] ?? null,
       })),
+      total,
+      page: page.page,
+      limit: page.limit,
     });
   });
 
@@ -899,20 +917,27 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/admin/builds", async (req, reply) => {
-    const { data, error } = await supabase
-      .from("builds")
-      .select("id, user_id, project_id, status, exit_code, workflow_run_id, created_at, completed_at")
-      .order("created_at", { ascending: false })
-      .limit(100);
-
-    if (error) {
+    const page = parsePageParams(req.query);
+    let items: Record<string, unknown>[];
+    let total: number;
+    try {
+      const res = await paginateTable<Record<string, unknown>>({
+        table: "builds",
+        columns: "id, user_id, project_id, status, exit_code, workflow_run_id, created_at, completed_at",
+        orderBy: "created_at",
+        ascending: false,
+        page,
+      });
+      items = res.items;
+      total = res.total;
+    } catch (err) {
+      logger.error({ err }, "Failed to list builds");
       return reply.status(500).send({
         error: { code: "INTERNAL_ERROR", message: "Failed to list builds" },
       });
     }
 
-    const builds = (data ?? []) as { user_id: string }[];
-    const ownerIds = [...new Set(builds.map((b) => b.user_id).filter(Boolean))];
+    const ownerIds = [...new Set(items.map((b) => (b as { user_id: string }).user_id).filter(Boolean))];
     let emails: Record<string, string> = {};
     if (ownerIds.length > 0) {
       const { data: users } = await supabase.from("users").select("id, email").in("id", ownerIds);
@@ -922,10 +947,13 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
     }
 
     return reply.send({
-      builds: ((data ?? []) as Record<string, unknown>[]).map((build) => ({
+      builds: items.map((build) => ({
         ...build,
         owner_email: emails[(build as { user_id: string }).user_id] ?? null,
       })),
+      total,
+      page: page.page,
+      limit: page.limit,
     });
   });
 
@@ -1208,6 +1236,11 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       supabase.from("webhook_events").select("event_type, created_at, processed").eq("provider", "whop").order("created_at", { ascending: false }).limit(30),
     ]);
 
+    // Aggregates need the full subscription set, so the list below is paged
+    // in code after the money math. Five hundred small rows are cheap; the
+    // pagination saves response payload, not database memory.
+    const page = parsePageParams(req.query);
+
     const subscriptions = (subs ?? []) as {
       user_id: string;
       plan_id: string;
@@ -1253,11 +1286,14 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
       at_risk_cents: atRiskCents,
       by_status: byStatus,
       by_plan: byPlan,
-      subscriptions: subscriptions.slice(0, 100).map((sub) => ({
+      subscriptions: subscriptions.slice(page.offset, page.offset + page.limit).map((sub) => ({
         ...sub,
         owner_email: emails[sub.user_id] ?? null,
         plan_name: priceByPlan[sub.plan_id]?.name ?? sub.plan_id,
       })),
+      total: subscriptions.length,
+      page: page.page,
+      limit: page.limit,
       // Individual charges live in Whop, which owns the money. The local event
       // log shows what the platform saw and when, which is what reconciles a
       // "why was I charged" question to an actual subscription change.
@@ -1304,22 +1340,25 @@ export async function adminRoutes(app: FastifyInstance): Promise<void> {
   // customer data and would drown the response — the inspector answers "what
   // arrived and did we act on it", and the full body waits in the database.
   app.get("/admin/webhooks", async (req, reply) => {
-    const query = req.query as { type?: string; processed?: string; limit?: string };
-    const limit = Math.min(200, Math.max(1, Number(query.limit) || 100));
+    const query = req.query as { type?: string; processed?: string; page?: string; limit?: string };
+    const page = parsePageParams(req.query);
     try {
-      const { data, error } = await supabase
-        .from("webhook_events")
-        .select("id, provider, event_type, processed, created_at")
-        .order("created_at", { ascending: false })
-        .limit(limit);
-      if (error) {
-        logger.warn({ err: error }, "Admin webhook table unreadable; returning empty log");
-        return reply.send({ events: [], event_types: [], pending_migration: true });
-      }
-      const rows = (data ?? []) as WebhookRow[];
+      // Type/processed narrow in code (substring + boolean binding differ per
+      // driver), so the page is fetched unfiltered and narrowed after. Webhook
+      // volume is low; the pagination saves payload, and total counts all rows.
+      const { items, total } = await paginateTable<WebhookRow>({
+        table: "webhook_events",
+        columns: "id, provider, event_type, processed, created_at",
+        orderBy: "created_at",
+        ascending: false,
+        page,
+      });
       return reply.send({
-        events: filterWebhookEvents(rows, query.type, query.processed),
-        event_types: [...new Set(rows.map((row) => row.event_type))].sort(),
+        events: filterWebhookEvents(items, query.type, query.processed),
+        total,
+        page: page.page,
+        limit: page.limit,
+        event_types: [...new Set(items.map((row) => row.event_type))].sort(),
         pending_migration: false,
       });
     } catch (err) {

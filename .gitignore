@@ -6,6 +6,11 @@ dist/
 website/server/dist/
 *.tsbuildinfo
 
+# Go edge local build artifacts (Docker builds its own copy)
+edge/edge
+edge/edge.exe
+edge/*.test
+
 # Environment
 .env
 .env.local

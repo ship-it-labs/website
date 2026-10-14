@@ -7,6 +7,7 @@ import { revokeAllSessions, revokeSessionRow, hashSessionToken } from "../servic
 import { checkRateLimit } from "../services/rate-limit.js";
 import { isCommonPassword } from "../utils/passwords.js";
 import { logger } from "../utils/logger.js";
+import { paginateTable, parsePageParams } from "../utils/pagination.js";
 
 /**
  * Self-service account management: password, email, sessions, preferences and
@@ -272,26 +273,46 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
       .eq("user_id", req.auth!.userId)
       .lt("last_seen_at", staleBefore);
 
-    const { data } = await supabase
-      .from("user_sessions")
-      .select("id, token_hash, user_agent, ip, created_at, last_seen_at")
-      .eq("user_id", req.auth!.userId)
-      .order("created_at", { ascending: false })
-      .limit(50);
+    const page = parsePageParams(req.query);
+    const userId = req.auth!.userId;
 
-    // The current device is marked server-side by matching the presented
-    // token's hash. The page used to assume the newest row was this device,
-    // which mislabeled everything whenever another login landed in between.
-    // Hashes never leave the server: they are compared, then stripped.
-    const currentHash = hashSessionToken(bearerToken(req));
-    const rows = ((data ?? []) as {
+    // Paginated: the settings Sessions tab fetches one page, so a decade of
+    // logins no longer ships on every visit. The current-device marking below
+    // applies to the visible page; the device in hand is the newest login, so
+    // it is on page one in practice.
+    type SessionRow = {
       id: string;
       token_hash?: string;
       user_agent: string | null;
       ip: string | null;
       created_at: string;
       last_seen_at: string;
-    }[]);
+    };
+    let fetched: SessionRow[];
+    let total: number;
+    try {
+      const res = await paginateTable<SessionRow>({
+        table: "user_sessions",
+        columns: "id, token_hash, user_agent, ip, created_at, last_seen_at",
+        orderBy: "created_at",
+        ascending: false,
+        page,
+        applyFilters: (q) => q.eq("user_id", userId),
+      });
+      fetched = res.items;
+      total = res.total;
+    } catch (err) {
+      logger.error({ err, userId }, "Failed to list sessions");
+      fetched = [];
+      total = 0;
+    }
+
+    // The current device is marked server-side by matching the presented
+    // token's hash. The page used to assume the newest row was this device,
+    // which mislabeled everything whenever another login landed in between.
+    // Hashes never leave the server: they are compared, then stripped.
+    const currentHash = hashSessionToken(bearerToken(req));
+    const rows = fetched;
 
     // last_seen_at is otherwise write-never, which would make the 30-day prune
     // above evict devices that are still in daily use. Touching the current
@@ -310,7 +331,7 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
       current: typeof token_hash === "string" && token_hash === currentHash,
     }));
 
-    return reply.send({ sessions });
+    return reply.send({ sessions, total, page: page.page, limit: page.limit });
   });
 
   // Connected apps: OAuth grants (tokens minted through the authorize page).
@@ -319,24 +340,34 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
   // filtering happens in code: boolean binding differs between SQLite (0/1)
   // and Postgres (true/false).
   app.get("/account/grants", async (req, reply) => {
-    const { data, error } = await supabase
-      .from("api_keys")
-      .select("id, name, is_active, created_at")
-      .eq("user_id", req.auth!.userId)
-      .like("name", "OpenCode (%")
-      .order("created_at", { ascending: false });
+    const page = parsePageParams(req.query);
+    const userId = req.auth!.userId;
 
-    if (error) {
+    let items: { id: string; name: string; is_active?: boolean | number | null; created_at: string }[];
+    let total: number;
+    try {
+      const res = await paginateTable<{ id: string; name: string; is_active?: boolean | number | null; created_at: string }>({
+        table: "api_keys",
+        columns: "id, name, is_active, created_at",
+        orderBy: "created_at",
+        ascending: false,
+        page,
+        applyFilters: (q) => q.eq("user_id", userId).like("name", "OpenCode (%"),
+      });
+      items = res.items;
+      total = res.total;
+    } catch (err) {
+      logger.error({ err, userId }, "Could not load connected apps");
       return reply.status(500).send({
         error: { code: "INTERNAL_ERROR", message: "Could not load connected apps" },
       });
     }
 
-    const grants = ((data ?? []) as { id: string; name: string; is_active?: boolean | number | null; created_at: string }[])
+    const grants = items
       .filter((row) => row.is_active === true || row.is_active === 1)
       .map(({ id, name, created_at }) => ({ id, name, created_at }));
 
-    return reply.send({ grants });
+    return reply.send({ grants, total, page: page.page, limit: page.limit });
   });
 
   app.delete("/account/grants/:id", async (req, reply) => {

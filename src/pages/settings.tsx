@@ -3,11 +3,13 @@ import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { usePageTitle } from "@/lib/page-title";
+import { usePaged } from "@/lib/use-paged";
 import {
   DashboardLayout,
   Panel,
   EmptyState,
 } from "@/components/site/DashboardLayout";
+import { Pagination } from "@/components/ui/Pagination";
 
 interface Session {
   id: string;
@@ -37,31 +39,63 @@ function SectionSaved({ show }: { show: boolean }) {
   return <p className="mt-3 text-xs text-emerald-300">Saved.</p>;
 }
 
+const TABS = [
+  { id: "profile", label: "Profile" },
+  { id: "security", label: "Security" },
+  { id: "sessions", label: "Sessions" },
+  { id: "apps", label: "Connected apps" },
+  { id: "preferences", label: "Preferences" },
+  { id: "danger", label: "Danger" },
+] as const;
+
+type TabId = (typeof TABS)[number]["id"];
+
 export function SettingsPage() {
   usePageTitle("Settings");
   const navigate = useNavigate();
   const { user, signOut } = useAuth();
+  const [tab, setTab] = useState<TabId>("profile");
 
   return (
     <DashboardLayout
       title="Settings"
       subtitle="Your account, sessions and preferences. Nothing here touches anyone else's data."
     >
-      <div className="grid gap-6 lg:grid-cols-2">
-        <ProfileSection email={user?.email ?? ""} />
-        <PasswordSection />
-        <SessionsSection onSignedOut={() => navigate("/login")} signOut={signOut} />
-        <GrantsSection />
-        <PreferencesSection />
+      <div role="tablist" aria-label="Settings sections" className="flex flex-wrap gap-2">
+        {TABS.map((t) => (
+          <button
+            key={t.id}
+            type="button"
+            role="tab"
+            aria-selected={tab === t.id}
+            onClick={() => setTab(t.id)}
+            className={
+              tab === t.id
+                ? "rounded-xl bg-white/[0.09] px-4 py-2 text-sm font-medium text-white"
+                : "rounded-xl px-4 py-2 text-sm text-zinc-400 transition-colors hover:bg-white/[0.05] hover:text-zinc-200"
+            }
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
-      <div className="mt-6">
-        <DangerSection
-          email={user?.email ?? ""}
-          onDeleted={async () => {
-            await signOut();
-            navigate("/");
-          }}
-        />
+      <div className="mt-6 max-w-2xl">
+        {tab === "profile" && <ProfileSection email={user?.email ?? ""} />}
+        {tab === "security" && <PasswordSection />}
+        {tab === "sessions" && (
+          <SessionsSection onSignedOut={() => navigate("/login")} signOut={signOut} />
+        )}
+        {tab === "apps" && <GrantsSection />}
+        {tab === "preferences" && <PreferencesSection />}
+        {tab === "danger" && (
+          <DangerSection
+            email={user?.email ?? ""}
+            onDeleted={async () => {
+              await signOut();
+              navigate("/");
+            }}
+          />
+        )}
       </div>
     </DashboardLayout>
   );
@@ -223,31 +257,20 @@ function SessionsSection({
   onSignedOut: () => void;
   signOut: () => Promise<void>;
 }) {
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const { items: sessions, page, total, limit, error, goto, reload } =
+    usePaged<Session>("/api/v1/account/sessions", "sessions", 10);
+  const [localError, setLocalError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      const result = await api.get<{ sessions: Session[] }>("/api/v1/account/sessions");
-      setSessions(result.sessions);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load sessions");
-    }
-  }, []);
-
-  useEffect(() => {
-    load();
-  }, [load]);
+  const failure = localError ?? error;
 
   async function revoke(id: string) {
     setBusy(id);
+    setLocalError(null);
     try {
       await api.del(`/api/v1/account/sessions/${id}`);
-      await load();
+      await reload();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not sign out that session");
+      setLocalError(err instanceof Error ? err.message : "Could not sign out that session");
     } finally {
       setBusy(null);
     }
@@ -255,11 +278,12 @@ function SessionsSection({
 
   async function revokeOthers() {
     setBusy("others");
+    setLocalError(null);
     try {
       await api.del("/api/v1/account/sessions");
-      await load();
+      await reload();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not sign out other sessions");
+      setLocalError(err instanceof Error ? err.message : "Could not sign out other sessions");
     } finally {
       setBusy(null);
     }
@@ -270,7 +294,7 @@ function SessionsSection({
       title="Sessions"
       description="Every remembered login. Sessions signed in before tracking shipped are not listed and keep working until they expire."
     >
-      <SectionError message={error} />
+      <SectionError message={failure} />
       {sessions.length === 0 ? (
         <EmptyState>No other sessions on record.</EmptyState>
       ) : (
@@ -326,6 +350,7 @@ function SessionsSection({
           >
             Sign out everywhere, including this device
           </button>
+          <Pagination page={page} limit={limit} total={total} onPage={goto} />
         </>
       )}
     </Panel>
@@ -342,31 +367,20 @@ interface Grant {
 // this account; revoking deletes it immediately. This replaces the retired
 // manual API-keys page as the place to cut off integrations.
 function GrantsSection() {
-  const [grants, setGrants] = useState<Grant[]>([]);
-  const [error, setError] = useState<string | null>(null);
+  const { items: grants, page, total, limit, error, goto, reload } =
+    usePaged<Grant>("/api/v1/account/grants", "grants", 10);
+  const [localError, setLocalError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-
-  const load = useCallback(async () => {
-    try {
-      const result = await api.get<{ grants: Grant[] }>("/api/v1/account/grants");
-      setGrants(result.grants);
-      setError(null);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not load connected apps");
-    }
-  }, []);
-
-  useEffect(() => {
-    load();
-  }, [load]);
+  const failure = localError ?? error;
 
   async function revoke(id: string) {
     setBusy(id);
+    setLocalError(null);
     try {
       await api.del(`/api/v1/account/grants/${id}`);
-      await load();
+      await reload();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Could not revoke access");
+      setLocalError(err instanceof Error ? err.message : "Could not revoke access");
     } finally {
       setBusy(null);
     }
@@ -377,33 +391,36 @@ function GrantsSection() {
       title="Connected apps"
       description="Integrations you authorized. Revoking cuts off access immediately."
     >
-      <SectionError message={error} />
+      <SectionError message={failure} />
       {grants.length === 0 ? (
         <EmptyState>No apps connected. Authorize OpenCode to see it here.</EmptyState>
       ) : (
-        <ul className="divide-y divide-white/[0.06]">
-          {grants.map((grant) => (
-            <li
-              key={grant.id}
-              className="flex items-center justify-between gap-4 py-3.5 first:pt-0 last:pb-0"
-            >
-              <div className="min-w-0">
-                <p className="truncate text-sm text-zinc-200">{grant.name}</p>
-                <p className="mt-1 text-xs text-zinc-600">
-                  connected {new Date(grant.created_at).toLocaleString()}
-                </p>
-              </div>
-              <button
-                type="button"
-                disabled={busy === grant.id}
-                onClick={() => revoke(grant.id)}
-                className="shrink-0 rounded-lg border border-white/10 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:border-white/20 hover:text-white disabled:opacity-40"
+        <>
+          <ul className="divide-y divide-white/[0.06]">
+            {grants.map((grant) => (
+              <li
+                key={grant.id}
+                className="flex items-center justify-between gap-4 py-3.5 first:pt-0 last:pb-0"
               >
-                {busy === grant.id ? "…" : "Revoke"}
-              </button>
-            </li>
-          ))}
-        </ul>
+                <div className="min-w-0">
+                  <p className="truncate text-sm text-zinc-200">{grant.name}</p>
+                  <p className="mt-1 text-xs text-zinc-600">
+                    connected {new Date(grant.created_at).toLocaleString()}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  disabled={busy === grant.id}
+                  onClick={() => revoke(grant.id)}
+                  className="shrink-0 rounded-lg border border-white/10 px-3 py-1.5 text-xs text-zinc-300 transition-colors hover:border-white/20 hover:text-white disabled:opacity-40"
+                >
+                  {busy === grant.id ? "…" : "Revoke"}
+                </button>
+              </li>
+            ))}
+          </ul>
+          <Pagination page={page} limit={limit} total={total} onPage={goto} />
+        </>
       )}
     </Panel>
   );

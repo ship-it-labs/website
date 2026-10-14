@@ -1,9 +1,9 @@
 import { timingSafeEqual } from "node:crypto";
-import crypto from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { supabase } from "../db/index.js";
-import { updateBuildStatus, getBuild, recordBundleArtifact } from "../services/build-service.js";
+import { updateBuildStatus, getBuild } from "../services/build-service.js";
+import { finalizeBundleUpload } from "../services/upload-finalize.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -101,7 +101,6 @@ export function capLogs(
  * than this do not fit the sandbox model anyway (see the 5GB per-runtime
  * watchdog on the agent); the workflow stays under it by excluding caches. */
 const MAX_BUNDLE_BYTES = 300 * 1024 * 1024;
-const BUNDLE_BUCKET = "project-uploads";
 
 export async function buildReportRoutes(app: FastifyInstance): Promise<void> {
   // Receives a workflow-built runtime bundle: the self-contained app +
@@ -154,37 +153,13 @@ export async function buildReportRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const sha256 = crypto.createHash("sha256").update(bundle).digest("hex");
-    const storagePath = `bundles/${id}.zip`;
-
-    const { error: uploadError } = await supabase.storage
-      .from(BUNDLE_BUCKET)
-      .upload(storagePath, bundle, {
-        contentType: "application/zip",
-        upsert: true,
-      });
-
-    if (uploadError) {
-      logger.error({ err: uploadError, buildId: id }, "Bundle storage upload failed");
-      return reply.status(502).send({
-        error: { code: "STORAGE_UNAVAILABLE", message: "Failed to store the bundle" },
-      });
-    }
-
-    try {
-      await recordBundleArtifact(id, {
-        sha256,
-        sizeBytes: bundle.length,
-        storagePath,
-      });
-    } catch {
-      return reply.status(500).send({
-        error: { code: "INTERNAL_ERROR", message: "Failed to record the bundle" },
-      });
-    }
-
-    logger.info({ buildId: id, bytes: bundle.length, sha256 }, "Recorded runtime bundle");
-    return reply.send({ ok: true, sha256, bytes: bundle.length });
+    // The storage + artifact tail lives in the shared finalize service so the
+    // edge's internal endpoint records staged bundles identically.
+    const outcome = await finalizeBundleUpload({
+      buildId: id,
+      store: { kind: "buffer", data: bundle },
+    });
+    return reply.status(outcome.status).send(outcome.body);
   });
 
   app.post("/builds/:id/report", async (req, reply) => {

@@ -27,6 +27,7 @@ import { startBuildPoller } from "./services/runtime-build.js";
 assertUrlsConfigured();
 import { buildRoutes } from "./routes/builds.js";
 import { buildReportRoutes } from "./routes/build-reports.js";
+import { internalIngestRoutes } from "./routes/internal.js";
 import { adminRoutes } from "./routes/admin.js";
 import { statusRoutes } from "./routes/status.js";
 import { projectRoutes } from "./routes/projects.js";
@@ -187,6 +188,9 @@ await app.register(clientErrorRoutes, { prefix: "/api/v1" });
 await app.register(agentRoutes, { prefix: "/api/v1" });
 await app.register(webhookRoutes, { prefix: "/api/v1" });
 await app.register(websocketRoutes);
+// No /api/v1 prefix: the Go edge calls these on the loopback interface with
+// a shared secret, and they must never be mistaken for public API.
+await app.register(internalIngestRoutes);
 
 app.get("/health", async () => ({
   status: "ok",

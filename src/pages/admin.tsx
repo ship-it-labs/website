@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, formatDuration, getAccessToken } from "@/lib/api";
 import { usePageTitle } from "@/lib/page-title";
 import {
@@ -12,6 +12,7 @@ import { BuildLogViewer } from "@/components/site/BuildLogViewer";
 import { LeaseCountdown, useNow } from "@/components/site/LeaseCountdown";
 import { EnvironmentSection } from "@/components/site/EnvironmentSection";
 import { DatabaseSection } from "@/components/site/DatabaseSection";
+import { Pagination } from "@/components/ui/Pagination";
 
 interface Overview {
   users: { total: number; by_plan: Record<string, number> };
@@ -587,17 +588,24 @@ function UsersSection({ onError }: { onError: (message: string | null) => void }
   const [confirmRole, setConfirmRole] = useState<string | null>(null);
   const [search, setSearch] = useState("");
   const [appliedSearch, setAppliedSearch] = useState("");
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const PAGE_SIZE = 25;
 
-  const load = useCallback(async (term: string) => {
+  const load = useCallback(async (term: string, p: number) => {
     try {
-      const [u, p] = await Promise.all([
-        api.get<{ users: AdminUser[] }>(
-          `/api/v1/admin/users${term ? `?q=${encodeURIComponent(term)}` : ""}`
+      const params = new URLSearchParams({ page: String(p), limit: String(PAGE_SIZE) });
+      if (term) params.set("q", term);
+      const [u, pl] = await Promise.all([
+        api.get<{ users: AdminUser[]; total?: number; page?: number }>(
+          `/api/v1/admin/users?${params.toString()}`
         ),
         api.get<{ plans: Plan[] }>("/api/v1/admin/plans").catch(() => ({ plans: [] })),
       ]);
       setUsers(u.users);
-      setPlans(p.plans);
+      setTotal(typeof u.total === "number" ? u.total : u.users.length);
+      setPage(typeof u.page === "number" ? u.page : p);
+      setPlans(pl.plans);
       onError(null);
     } catch (err) {
       onError(err instanceof Error ? err.message : "Could not load users");
@@ -606,8 +614,13 @@ function UsersSection({ onError }: { onError: (message: string | null) => void }
   }, []);
 
   useEffect(() => {
-    load("");
+    load("", 1);
   }, [load]);
+
+  const goto = (p: number) => {
+    setPage(p);
+    load(appliedSearch, p);
+  };
 
   const act = async (id: string, action: "disable" | "enable" | "promote" | "demote") => {
     setBusy(`${action}:${id}`);
@@ -615,7 +628,7 @@ function UsersSection({ onError }: { onError: (message: string | null) => void }
       await api.post(`/api/v1/admin/users/${id}/${action}`, {});
       setConfirm(null);
       setConfirmRole(null);
-      await load(appliedSearch);
+      await load(appliedSearch, page);
     } catch (err) {
       onError(err instanceof Error ? err.message : `Could not ${action} the account`);
     } finally {
@@ -627,7 +640,7 @@ function UsersSection({ onError }: { onError: (message: string | null) => void }
     setBusy(`plan:${id}`);
     try {
       await api.patch(`/api/v1/admin/users/${id}/plan`, { plan_id: planId });
-      await load(appliedSearch);
+      await load(appliedSearch, page);
     } catch (err) {
       onError(err instanceof Error ? err.message : "Could not change the plan");
     } finally {
@@ -650,7 +663,8 @@ function UsersSection({ onError }: { onError: (message: string | null) => void }
         onSubmit={(event) => {
           event.preventDefault();
           setAppliedSearch(search.trim());
-          load(search.trim());
+          setPage(1);
+          load(search.trim(), 1);
         }}
       >
         <input
@@ -683,6 +697,7 @@ function UsersSection({ onError }: { onError: (message: string | null) => void }
           {appliedSearch ? `No users match "${appliedSearch}".` : "No users yet."}
         </EmptyState>
       ) : (
+      <>
       <ul className="divide-y divide-white/[0.06]">
         {users.map((user) => {
           const working = busy !== null && busy.endsWith(user.id);
@@ -812,6 +827,8 @@ function UsersSection({ onError }: { onError: (message: string | null) => void }
           );
         })}
       </ul>
+      <Pagination page={page} limit={PAGE_SIZE} total={total} onPage={goto} />
+      </>
       )}
     </Panel>
   );
@@ -827,11 +844,18 @@ function RuntimesSection({
   const [runtimes, setRuntimes] = useState<AdminRuntime[]>([]);
   const [busy, setBusy] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<string | null>(null);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const PAGE_SIZE = 25;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (p: number) => {
     try {
-      const result = await api.get<{ runtimes: AdminRuntime[] }>("/api/v1/admin/runtimes");
+      const result = await api.get<{ runtimes: AdminRuntime[]; total?: number; page?: number }>(
+        `/api/v1/admin/runtimes?page=${p}&limit=${PAGE_SIZE}`
+      );
       setRuntimes(result.runtimes);
+      setTotal(typeof result.total === "number" ? result.total : result.runtimes.length);
+      setPage(typeof result.page === "number" ? result.page : p);
       onError(null);
     } catch (err) {
       onError(err instanceof Error ? err.message : "Could not load runtimes");
@@ -839,18 +863,28 @@ function RuntimesSection({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // The live list refreshes on a timer; the page is held in a ref so the
+  // interval always reloads the visible page instead of snapping to one.
+  const pageRef = useRef(page);
+  pageRef.current = page;
+
   useEffect(() => {
-    load();
-    const timer = window.setInterval(load, 10_000);
+    load(1);
+    const timer = window.setInterval(() => load(pageRef.current), 10_000);
     return () => window.clearInterval(timer);
   }, [load]);
+
+  const goto = (p: number) => {
+    setPage(p);
+    load(p);
+  };
 
   const stop = async (id: string) => {
     setBusy(id);
     try {
       await api.post(`/api/v1/admin/runtimes/${id}/stop`, {});
       setConfirm(null);
-      await load();
+      await load(pageRef.current);
     } catch (err) {
       onError(err instanceof Error ? err.message : "Could not stop the runtime");
     } finally {
@@ -935,6 +969,7 @@ function RuntimesSection({
           );
         })}
       </ul>
+      <Pagination page={page} limit={PAGE_SIZE} total={total} onPage={goto} />
     </Panel>
   );
 }
@@ -942,11 +977,18 @@ function RuntimesSection({
 function BuildsSection({ onError }: { onError: (message: string | null) => void }) {
   const [builds, setBuilds] = useState<AdminBuild[]>([]);
   const [openBuild, setOpenBuild] = useState<AdminBuild | null>(null);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const PAGE_SIZE = 25;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (p: number) => {
     try {
-      const result = await api.get<{ builds: AdminBuild[] }>("/api/v1/admin/builds");
+      const result = await api.get<{ builds: AdminBuild[]; total?: number; page?: number }>(
+        `/api/v1/admin/builds?page=${p}&limit=${PAGE_SIZE}`
+      );
       setBuilds(result.builds);
+      setTotal(typeof result.total === "number" ? result.total : result.builds.length);
+      setPage(typeof result.page === "number" ? result.page : p);
       onError(null);
     } catch (err) {
       onError(err instanceof Error ? err.message : "Could not load builds");
@@ -954,11 +996,19 @@ function BuildsSection({ onError }: { onError: (message: string | null) => void 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const pageRef = useRef(page);
+  pageRef.current = page;
+
   useEffect(() => {
-    load();
-    const timer = window.setInterval(load, 15_000);
+    load(1);
+    const timer = window.setInterval(() => load(pageRef.current), 15_000);
     return () => window.clearInterval(timer);
   }, [load]);
+
+  const goto = (p: number) => {
+    setPage(p);
+    load(p);
+  };
 
   if (builds.length === 0) {
     return (
@@ -995,6 +1045,7 @@ function BuildsSection({ onError }: { onError: (message: string | null) => void 
             </li>
           ))}
         </ul>
+        <Pagination page={page} limit={PAGE_SIZE} total={total} onPage={goto} />
       </Panel>
 
       {openBuild && (
@@ -1027,6 +1078,9 @@ interface Payments {
     current_period_end: string | null;
     cancel_at_period_end?: boolean | number | null;
   }[];
+  total?: number;
+  page?: number;
+  limit?: number;
   recent_events: { event_type: string; created_at: string; processed?: boolean | number | null }[];
 }
 
@@ -1052,10 +1106,14 @@ function PaymentsSection({ onError }: { onError: (message: string | null) => voi
   const [attachResult, setAttachResult] = useState<string | null>(null);
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [detail, setDetail] = useState<SubscriptionDetail | null>(null);
+  const [page, setPage] = useState(1);
+  const PAGE_SIZE = 20;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (p: number) => {
     try {
-      setPayments(await api.get<Payments>("/api/v1/admin/payments"));
+      const res = await api.get<Payments>(`/api/v1/admin/payments?page=${p}&limit=${PAGE_SIZE}`);
+      setPayments(res);
+      setPage(typeof res.page === "number" ? res.page : p);
       onError(null);
     } catch (err) {
       onError(err instanceof Error ? err.message : "Could not load payments");
@@ -1063,11 +1121,19 @@ function PaymentsSection({ onError }: { onError: (message: string | null) => voi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const pageRef = useRef(page);
+  pageRef.current = page;
+
   useEffect(() => {
-    load();
-    const timer = window.setInterval(load, 30_000);
+    load(1);
+    const timer = window.setInterval(() => load(pageRef.current), 30_000);
     return () => window.clearInterval(timer);
   }, [load]);
+
+  const goto = (p: number) => {
+    setPage(p);
+    load(p);
+  };
 
   async function attach() {
     if (!email.trim() || !membershipId.trim()) {
@@ -1084,7 +1150,7 @@ function PaymentsSection({ onError }: { onError: (message: string | null) => voi
       setAttachResult(`Attached: ${result.plan_id} (${result.status}).`);
       setEmail("");
       setMembershipId("");
-      await load();
+      await load(pageRef.current);
     } catch (err) {
       onError(err instanceof Error ? err.message : "Could not attach the membership");
     } finally {
@@ -1135,8 +1201,9 @@ function PaymentsSection({ onError }: { onError: (message: string | null) => voi
           {payments.subscriptions.length === 0 ? (
             <EmptyState>No subscriptions yet.</EmptyState>
           ) : (
-            <ul className="divide-y divide-white/[0.06]">
-              {payments.subscriptions.slice(0, 20).map((sub, index) => (
+            <>
+              <ul className="divide-y divide-white/[0.06]">
+                {payments.subscriptions.map((sub, index) => (
                 <li key={`${sub.user_id}-${index}`}>
                   <button
                     type="button"
@@ -1169,6 +1236,13 @@ function PaymentsSection({ onError }: { onError: (message: string | null) => voi
                 </li>
               ))}
             </ul>
+            <Pagination
+              page={page}
+              limit={PAGE_SIZE}
+              total={payments.total ?? payments.subscriptions.length}
+              onPage={goto}
+            />
+            </>
           )}
         </Panel>
 
@@ -1823,17 +1897,29 @@ function AuditSection({ onError }: { onError: (message: string | null) => void }
   const [entries, setEntries] = useState<AuditEntry[]>([]);
   const [actions, setActions] = useState<string[]>([]);
   const [filter, setFilter] = useState("all");
-  const [pending] = useState(false);
+  const [pending, setPending] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const PAGE_SIZE = 50;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (action: string, p: number) => {
     try {
-      const result = await api.get<{ entries: AuditEntry[]; actions?: string[]; pending_migration: boolean }>(
-        "/api/v1/admin/audit?limit=200"
-      );
+      const params = new URLSearchParams({ page: String(p), limit: String(PAGE_SIZE) });
+      if (action !== "all") params.set("action", action);
+      const result = await api.get<{
+        entries: AuditEntry[];
+        actions?: string[];
+        total?: number;
+        page?: number;
+        pending_migration: boolean;
+      }>(`/api/v1/admin/audit?${params.toString()}`);
       setEntries(result.entries);
       // Fall back to client-derived names when an older server omits them.
       setActions(result.actions ?? [...new Set(result.entries.map((e) => e.action))].sort());
+      setTotal(typeof result.total === "number" ? result.total : result.entries.length);
+      setPage(typeof result.page === "number" ? result.page : p);
+      setPending(result.pending_migration);
       setLoaded(true);
       onError(null);
     } catch (err) {
@@ -1843,8 +1929,19 @@ function AuditSection({ onError }: { onError: (message: string | null) => void }
   }, []);
 
   useEffect(() => {
-    load();
+    load("all", 1);
   }, [load]);
+
+  const changeFilter = (action: string) => {
+    setFilter(action);
+    setPage(1);
+    load(action, 1);
+  };
+
+  const goto = (p: number) => {
+    setPage(p);
+    load(filter, p);
+  };
 
   if (!loaded) return <p className="text-sm text-zinc-500">Loading…</p>;
 
@@ -1872,7 +1969,7 @@ function AuditSection({ onError }: { onError: (message: string | null) => void }
         <select
           id="audit-action-filter"
           value={filter}
-          onChange={(event) => setFilter(event.target.value)}
+          onChange={(event) => changeFilter(event.target.value)}
           className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-200 focus:border-violet-500/60 focus:outline-none [&>option]:bg-zinc-900"
         >
           <option value="all">All actions</option>
@@ -1897,7 +1994,8 @@ function AuditSection({ onError }: { onError: (message: string | null) => void }
       ) : visible.length === 0 ? (
         <EmptyState>No entries with action “{filter}”. Pick another action.</EmptyState>
       ) : (
-        <ul className="divide-y divide-white/[0.06]">
+        <>
+          <ul className="divide-y divide-white/[0.06]">
           {visible.map((entry) => (
             <li key={entry.id} className="py-3 first:pt-0 last:pb-0">
               <p className="text-sm text-zinc-200">
@@ -1918,6 +2016,8 @@ function AuditSection({ onError }: { onError: (message: string | null) => void }
             </li>
           ))}
         </ul>
+        <Pagination page={page} limit={PAGE_SIZE} total={total} onPage={goto} />
+        </>
       )}
     </Panel>
   );
@@ -1953,19 +2053,26 @@ function ErrorsSection({ onError }: { onError: (message: string | null) => void 
   const [source, setSource] = useState("all");
   const [search, setSearch] = useState("");
   const [loaded, setLoaded] = useState(false);
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const PAGE_SIZE = 50;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (src: string, term: string, p: number) => {
     try {
-      const params = new URLSearchParams({ limit: "200" });
-      if (source !== "all") params.set("source", source);
-      if (search.trim()) params.set("search", search.trim());
+      const params = new URLSearchParams({ page: String(p), limit: String(PAGE_SIZE) });
+      if (src !== "all") params.set("source", src);
+      if (term.trim()) params.set("search", term.trim());
       const result = await api.get<{
         entries: ErrorEntry[];
         stats: ErrorStats | null;
+        total?: number;
+        page?: number;
         pending_migration: boolean;
       }>(`/api/v1/admin/errors?${params.toString()}`);
       setEntries(result.entries);
       setStats(result.stats);
+      setTotal(typeof result.total === "number" ? result.total : result.entries.length);
+      setPage(typeof result.page === "number" ? result.page : p);
       setPendingMigration(result.pending_migration);
       setLoaded(true);
       onError(null);
@@ -1973,11 +2080,27 @@ function ErrorsSection({ onError }: { onError: (message: string | null) => void 
       onError(err instanceof Error ? err.message : "Could not load the error log");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [source]);
+  }, []);
 
   useEffect(() => {
-    load();
+    load("all", "", 1);
   }, [load]);
+
+  const changeSource = (src: string) => {
+    setSource(src);
+    setPage(1);
+    load(src, search, 1);
+  };
+
+  const runSearch = () => {
+    setPage(1);
+    load(source, search, 1);
+  };
+
+  const goto = (p: number) => {
+    setPage(p);
+    load(source, search, p);
+  };
 
   if (!loaded) return <p className="text-sm text-zinc-500">Loading…</p>;
 
@@ -2016,7 +2139,7 @@ function ErrorsSection({ onError }: { onError: (message: string | null) => void 
         <select
           id="errors-source-filter"
           value={source}
-          onChange={(event) => setSource(event.target.value)}
+          onChange={(event) => changeSource(event.target.value)}
           className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-200 focus:border-violet-500/60 focus:outline-none [&>option]:bg-zinc-900"
         >
           <option value="all">All sources</option>
@@ -2029,7 +2152,7 @@ function ErrorsSection({ onError }: { onError: (message: string | null) => void 
           value={search}
           onChange={(event) => setSearch(event.target.value)}
           onKeyDown={(event) => {
-            if (event.key === "Enter") load();
+            if (event.key === "Enter") runSearch();
           }}
           placeholder="Search messages…"
           aria-label="Search error messages"
@@ -2037,7 +2160,7 @@ function ErrorsSection({ onError }: { onError: (message: string | null) => void 
         />
         <button
           type="button"
-          onClick={load}
+          onClick={runSearch}
           className="rounded-lg border border-white/10 px-3 py-2 text-sm text-zinc-300 transition-colors hover:border-white/20 hover:text-white"
         >
           Refresh
@@ -2050,7 +2173,8 @@ function ErrorsSection({ onError }: { onError: (message: string | null) => void 
             : "No failures recorded. API 5xx responses, page crashes and failed loads will appear here."}
         </EmptyState>
       ) : (
-        <ul className="divide-y divide-white/[0.06]">
+        <>
+          <ul className="divide-y divide-white/[0.06]">
           {entries.map((entry) => (
             <li key={entry.id} className="py-3 first:pt-0 last:pb-0">
               <p className="flex flex-wrap items-center gap-2 text-sm text-zinc-200">
@@ -2081,6 +2205,8 @@ function ErrorsSection({ onError }: { onError: (message: string | null) => void 
             </li>
           ))}
         </ul>
+        <Pagination page={page} limit={PAGE_SIZE} total={total} onPage={goto} />
+        </>
       )}
     </Panel>
   );
@@ -2144,18 +2270,26 @@ function WebhooksSection({ onError }: { onError: (message: string | null) => voi
   const [loaded, setLoaded] = useState(false);
   const [typeFilter, setTypeFilter] = useState("");
   const [processedFilter, setProcessedFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
+  const PAGE_SIZE = 50;
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (type: string, processed: string, p: number) => {
     try {
-      const params = new URLSearchParams();
-      if (typeFilter.trim()) params.set("type", typeFilter.trim());
-      if (processedFilter !== "all") params.set("processed", processedFilter);
-      const suffix = params.size > 0 ? `?${params.toString()}` : "";
-      const result = await api.get<{ events: WebhookEvent[]; event_types?: string[]; pending_migration: boolean }>(
-        `/api/v1/admin/webhooks${suffix}`
-      );
+      const params = new URLSearchParams({ page: String(p), limit: String(PAGE_SIZE) });
+      if (type.trim()) params.set("type", type.trim());
+      if (processed !== "all") params.set("processed", processed);
+      const result = await api.get<{
+        events: WebhookEvent[];
+        event_types?: string[];
+        total?: number;
+        page?: number;
+        pending_migration: boolean;
+      }>(`/api/v1/admin/webhooks?${params.toString()}`);
       setEvents(result.events);
       setEventTypes(result.event_types ?? []);
+      setTotal(typeof result.total === "number" ? result.total : result.events.length);
+      setPage(typeof result.page === "number" ? result.page : p);
       setPending(result.pending_migration);
       setLoaded(true);
       onError(null);
@@ -2163,17 +2297,45 @@ function WebhooksSection({ onError }: { onError: (message: string | null) => voi
       onError(err instanceof Error ? err.message : "Could not load webhook events");
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [typeFilter, processedFilter]);
+  }, []);
+
+  const pageRef = useRef(page);
+  pageRef.current = page;
+  const filterRef = useRef({ type: typeFilter, processed: processedFilter });
+  filterRef.current = { type: typeFilter, processed: processedFilter };
 
   useEffect(() => {
-    const timer = window.setTimeout(load, typeFilter ? 300 : 0);
+    // Debounced so typing a type substring does not fire a request per key.
+    const timer = window.setTimeout(
+      () => load(typeFilter, processedFilter, 1),
+      typeFilter ? 300 : 0
+    );
     return () => window.clearTimeout(timer);
-  }, [load, typeFilter]);
+  }, [load, typeFilter, processedFilter]);
 
   useEffect(() => {
-    const timer = window.setInterval(load, 30_000);
+    const timer = window.setInterval(() => {
+      const f = filterRef.current;
+      load(f.type, f.processed, pageRef.current);
+    }, 30_000);
     return () => window.clearInterval(timer);
   }, [load]);
+
+  const goto = (p: number) => {
+    setPage(p);
+    load(typeFilter, processedFilter, p);
+  };
+
+  const changeType = (type: string) => {
+    setTypeFilter(type);
+    setPage(1);
+  };
+
+  const changeProcessed = (processed: string) => {
+    setProcessedFilter(processed);
+    setPage(1);
+    // The filter effect above refetches page one; no direct load here.
+  };
 
   if (!loaded) return <p className="text-sm text-zinc-500">Loading…</p>;
 
@@ -2192,7 +2354,7 @@ function WebhooksSection({ onError }: { onError: (message: string | null) => voi
           <input
             type="search"
             value={typeFilter}
-            onChange={(event) => setTypeFilter(event.target.value)}
+            onChange={(event) => changeType(event.target.value)}
             placeholder="Filter by event type…"
             aria-label="Filter webhook events by type"
             list="webhook-event-types"
@@ -2205,7 +2367,7 @@ function WebhooksSection({ onError }: { onError: (message: string | null) => voi
           </datalist>
           <select
             value={processedFilter}
-            onChange={(event) => setProcessedFilter(event.target.value)}
+            onChange={(event) => changeProcessed(event.target.value)}
             aria-label="Filter by processed state"
             className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2 text-sm text-zinc-200 focus:border-violet-500/60 focus:outline-none [&>option]:bg-zinc-900"
           >
@@ -2221,28 +2383,31 @@ function WebhooksSection({ onError }: { onError: (message: string | null) => voi
               : "No webhook events recorded yet."}
           </EmptyState>
         ) : (
-          <ul className="divide-y divide-white/[0.06]">
-            {events.map((event) => {
-              const done = event.processed === true || event.processed === 1;
-              return (
-                <li key={event.id} className="flex items-center justify-between gap-4 py-2.5 first:pt-0 last:pb-0">
-                  <div className="min-w-0">
-                    <p className="truncate font-mono text-xs text-zinc-300">{event.event_type}</p>
-                    <p className="mt-0.5 text-xs text-zinc-600">
-                      {event.provider} · {new Date(event.created_at).toLocaleString()}
-                    </p>
-                  </div>
-                  <span
-                    className={`shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[11px] ${
-                      done ? "bg-emerald-500/15 text-emerald-200" : "bg-amber-500/15 text-amber-200"
-                    }`}
-                  >
-                    {done ? "processed" : "unprocessed"}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
+          <>
+            <ul className="divide-y divide-white/[0.06]">
+              {events.map((event) => {
+                const done = event.processed === true || event.processed === 1;
+                return (
+                  <li key={event.id} className="flex items-center justify-between gap-4 py-2.5 first:pt-0 last:pb-0">
+                    <div className="min-w-0">
+                      <p className="truncate font-mono text-xs text-zinc-300">{event.event_type}</p>
+                      <p className="mt-0.5 text-xs text-zinc-600">
+                        {event.provider} · {new Date(event.created_at).toLocaleString()}
+                      </p>
+                    </div>
+                    <span
+                      className={`shrink-0 rounded-md px-1.5 py-0.5 font-mono text-[11px] ${
+                        done ? "bg-emerald-500/15 text-emerald-200" : "bg-amber-500/15 text-amber-200"
+                      }`}
+                    >
+                      {done ? "processed" : "unprocessed"}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+            <Pagination page={page} limit={PAGE_SIZE} total={total} onPage={goto} />
+          </>
         )}
       </Panel>
       <div className="mt-6">
