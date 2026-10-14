@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -25,15 +26,20 @@ type Storage struct {
 	base   string
 	key    string
 	client *http.Client
+	log    *slog.Logger
 }
 
-func NewStorage(supabaseURL, serviceKey string) *Storage {
+func NewStorage(supabaseURL, serviceKey string, log *slog.Logger) *Storage {
+	if log == nil {
+		log = slog.Default()
+	}
 	return &Storage{
 		base: strings.TrimRight(strings.TrimSpace(supabaseURL), "/") + "/storage/v1",
 		key:  serviceKey,
 		// Deliberately no Timeout: a 400MB body on a slow link legitimately
 		// takes minutes, and cancellation flows from the caller's context.
 		client: &http.Client{},
+		log:    log,
 	}
 }
 
@@ -61,11 +67,19 @@ func (s *Storage) Upload(ctx context.Context, bucket, path string, body io.Reade
 	req.Header.Set("cache-control", "max-age=3600")
 	resp, err := s.client.Do(req)
 	if err != nil {
+		// Transport failure (DNS, TLS, reset): logged here because the caller
+		// only sees a 502 and the cause would otherwise be invisible.
+		s.log.Error("storage upload transport failed", "error", err, "bucket", bucket, "path", path)
 		return err
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// Supabase's rejection body names the real problem (missing bucket,
+		// RLS, quota, size cap). Logged server-side; the caller gets the
+		// generic 502 so internals never leak to CI logs.
+		s.log.Error("storage upload rejected",
+			"status", resp.StatusCode, "bucket", bucket, "path", path, "body", truncateStr(string(raw), 500))
 		return fmt.Errorf("storage upload: status %d", resp.StatusCode)
 	}
 	return nil

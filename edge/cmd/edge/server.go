@@ -18,7 +18,7 @@ type Server struct {
 func NewServer(cfg Config, log *slog.Logger) *Server {
 	return &Server{
 		cfg:   cfg,
-		store: NewStorage(cfg.SupabaseURL, cfg.SupabaseKey),
+		store: NewStorage(cfg.SupabaseURL, cfg.SupabaseKey, log),
 		proxy: newProxy(cfg.UpstreamURL),
 		log:   log,
 	}
@@ -58,6 +58,10 @@ func (s *Server) handleProjectUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	res, ierr := streamUploadToStaging(r.Context(), s.store, s.cfg.StorageBucket, r, s.cfg.MaxUploadBytes)
 	if ierr != nil {
+		// Logged: storage rejections are otherwise silent (the caller gets a
+		// generic 502), which once left a bundle failure with no trace.
+		s.log.Error("project ingest failed",
+			"status", ierr.status, "code", ierr.code, "message", ierr.message)
 		writeIngestError(w, ierr)
 		return
 	}
@@ -103,6 +107,8 @@ func (s *Server) handleBundleUpload(w http.ResponseWriter, r *http.Request) {
 		if ierr.status == 413 {
 			ierr = &ingestError{status: 413, code: "BUNDLE_TOO_LARGE", message: ierr.message}
 		}
+		s.log.Error("bundle ingest failed",
+			"build_id", id, "status", ierr.status, "code", ierr.code, "message", ierr.message)
 		writeIngestError(w, ierr)
 		return
 	}

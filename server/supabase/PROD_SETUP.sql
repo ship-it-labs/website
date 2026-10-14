@@ -111,6 +111,8 @@ create table if not exists public.builds (
   workflow_run_id text,
   exit_code integer,
   timeout_seconds integer not null default 180,
+  source_sha256 text,
+  source_repo text,
   started_at timestamptz,
   completed_at timestamptz,
   created_at timestamptz not null default now()
