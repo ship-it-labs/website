@@ -11,7 +11,7 @@ import {
   EnvConfigError,
   EnvCryptoError,
 } from "../utils/env-crypto.js";
-import { agentStoreUrl } from "../utils/agent-store.js";
+import { copyStagedObject, deleteStagedObjects } from "./object-store.js";
 
 /**
  * The metadata tail of the two large-body uploads, shared by the public
@@ -33,17 +33,7 @@ export const BUNDLE_BUCKET = "project-uploads";
 
 export type UploadStore =
   | { kind: "buffer"; data: Buffer }
-  // Bytes already persisted on a server-agent's disk by the edge. Nothing to
-  // move or sign: the fetch URL below is what runtime starters GET (ticket in
-  // query, sha verified on arrival), on this host or a sibling.
-  | {
-      kind: "agent";
-      agentUrl: string;
-      key: string;
-      sha256: string;
-      bytes: number;
-      ticket: string;
-    };
+  | { kind: "staging"; path: string; sha256: string; bytes: number };
 
 export interface ProjectFinalizeInput {
   userId: string;
@@ -70,23 +60,36 @@ export interface FinalizeOutcome {
 async function placeObject(
   bucket: string,
   storagePath: string,
-  // Buffer only: the direct-to-Node path (local development and callers
-  // reaching Node without the edge). Agent bytes are already stored; edge
-  // callers never reach here.
-  data: Buffer,
+  store: UploadStore,
   // Projects mint a fresh upload id per upload so they must never overwrite;
   // bundles reuse one key per build id so re-uploads replace.
   upsert: boolean,
   logCtx: Record<string, unknown>
 ): Promise<{ ok: true } | { ok: false; outcome: FinalizeOutcome }> {
-  const { error: uploadError } = await supabase.storage
-    .from(bucket)
-    .upload(storagePath, data, {
-      contentType: "application/zip",
-      upsert,
-    });
-  if (uploadError) {
-    logger.error({ err: uploadError, ...logCtx }, "Storage upload failed");
+  if (store.kind === "buffer") {
+    const { error: uploadError } = await supabase.storage
+      .from(bucket)
+      .upload(storagePath, store.data, {
+        contentType: "application/zip",
+        upsert,
+      });
+    if (uploadError) {
+      logger.error({ err: uploadError, ...logCtx }, "Storage upload failed");
+      return {
+        ok: false,
+        outcome: {
+          status: 502,
+          body: { error: { code: "STORAGE_UNAVAILABLE", message: "Failed to store the upload" } },
+        },
+      };
+    }
+    return { ok: true };
+  }
+
+  try {
+    await copyStagedObject(bucket, store.path, storagePath);
+  } catch (err) {
+    logger.error({ err, ...logCtx, staging: store.path }, "Staging copy failed");
     return {
       ok: false,
       outcome: {
@@ -95,12 +98,18 @@ async function placeObject(
       },
     };
   }
+  // Best effort: the object is safely at its final key, so a failed cleanup
+  // must not fail the upload. The staging sweeper reaps leftovers.
+  try {
+    await deleteStagedObjects(bucket, [store.path]);
+  } catch (err) {
+    logger.warn({ err, ...logCtx, staging: store.path }, "Staging cleanup failed; sweeper will reap it");
+  }
   return { ok: true };
 }
 
 export async function finalizeProjectUpload(input: ProjectFinalizeInput): Promise<FinalizeOutcome> {
   const { userId, requestedId } = input;
-  const isAgent = input.store.kind === "agent";
   const { sha256, bytes } =
     input.store.kind === "buffer"
       ? {
@@ -125,39 +134,22 @@ export async function finalizeProjectUpload(input: ProjectFinalizeInput): Promis
   });
 
   const uploadId = `up_${crypto.randomUUID().slice(0, 12)}`;
-  // Agent-stored bytes already live at their final key; upload_path records it
-  // for reference and cleanup, and no Supabase placement happens.
-  const storagePath = isAgent
-    ? (input.store as { key: string }).key
-    : `${userId}/${resolvedId}/${uploadId}.zip`;
+  const storagePath = `${userId}/${resolvedId}/${uploadId}.zip`;
   const logCtx = { userId, projectId: requestedId, resolvedId, uploadId };
 
-  let signedUrl: string;
-  if (isAgent) {
-    const agent = input.store as { agentUrl: string; key: string; ticket: string };
-    signedUrl = agentStoreUrl(agent.agentUrl, agent.key, agent.ticket);
-  } else {
-    const placed = await placeObject(
-      PROJECT_BUCKET,
-      storagePath,
-      (input.store as { kind: "buffer"; data: Buffer }).data,
-      false,
-      logCtx
-    );
-    if (!placed.ok) return placed.outcome;
+  const placed = await placeObject(PROJECT_BUCKET, storagePath, input.store, false, logCtx);
+  if (!placed.ok) return placed.outcome;
 
-    const { data: signed, error: signError } = await supabase.storage
-      .from(PROJECT_BUCKET)
-      .createSignedUrl(storagePath, 60 * 30);
+  const { data: signed, error: signError } = await supabase.storage
+    .from(PROJECT_BUCKET)
+    .createSignedUrl(storagePath, 60 * 30);
 
-    if (signError || !signed?.signedUrl) {
-      logger.error({ err: signError, ...logCtx }, "Failed to sign upload URL");
-      return {
-        status: 502,
-        body: { error: { code: "STORAGE_UNAVAILABLE", message: "Failed to sign the project archive" } },
-      };
-    }
-    signedUrl = signed.signedUrl;
+  if (signError || !signed?.signedUrl) {
+    logger.error({ err: signError, ...logCtx }, "Failed to sign upload URL");
+    return {
+      status: 502,
+      body: { error: { code: "STORAGE_UNAVAILABLE", message: "Failed to sign the project archive" } },
+    };
   }
 
   const now = new Date().toISOString();
@@ -233,9 +225,9 @@ export async function finalizeProjectUpload(input: ProjectFinalizeInput): Promis
       run_command: input.runCommand,
       language: resolved.language,
       env_ciphertext: envCiphertext,
-        upload_id: uploadId,
-        upload_path: storagePath,
-        upload_url: signedUrl,
+      upload_id: uploadId,
+      upload_path: storagePath,
+      upload_url: signed.signedUrl,
       upload_sha256: sha256,
       upload_bytes: bytes,
       file_count: input.manifest?.files?.length ?? 0,
@@ -283,28 +275,10 @@ export async function finalizeBundleUpload(input: BundleFinalizeInput): Promise<
         }
       : { sha256: input.store.sha256, bytes: input.store.bytes };
 
-  // Replace semantics: re-uploads overwrite the same key. Agent-stored bytes
-  // already live at their key; recordBundleArtifact stores the string it is
-  // given into the artifacts `url` column, so the agent fetch URL goes there
-  // directly and starters GET it like any other URL.
-  const isAgent = input.store.kind === "agent";
-  const storagePath = isAgent
-    ? agentStoreUrl(
-        (input.store as { agentUrl: string }).agentUrl,
-        (input.store as { key: string }).key,
-        (input.store as { ticket: string }).ticket
-      )
-    : `bundles/${buildId}.zip`;
-  if (!isAgent) {
-    const placed = await placeObject(
-      BUNDLE_BUCKET,
-      storagePath,
-      (input.store as { kind: "buffer"; data: Buffer }).data,
-      true,
-      { buildId }
-    );
-    if (!placed.ok) return placed.outcome;
-  }
+  // Replace semantics: re-uploads overwrite the same key.
+  const storagePath = `bundles/${buildId}.zip`;
+  const placed = await placeObject(BUNDLE_BUCKET, storagePath, input.store, true, { buildId });
+  if (!placed.ok) return placed.outcome;
 
   try {
     await recordBundleArtifact(buildId, {

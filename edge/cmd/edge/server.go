@@ -6,12 +6,12 @@ import (
 )
 
 // Server fronts the Node control plane. Two multipart routes are intercepted
-// and piped to the server-agent's object store; every other request — API,
-// websockets, /health, static assets, the SPA fallback — passes straight
-// through to Node.
+// and streamed; every other request — API, websockets, /health, static
+// assets, the SPA fallback — passes straight through to Node.
 type Server struct {
 	cfg   Config
-	agent agentStorer
+	store objectStore
+	tus   tusUploader
 	proxy http.Handler
 	log   *slog.Logger
 }
@@ -19,7 +19,8 @@ type Server struct {
 func NewServer(cfg Config, log *slog.Logger) *Server {
 	return &Server{
 		cfg:   cfg,
-		agent: newAgentUploader(cfg.AgentStoreURL, cfg.AgentSecret, log),
+		store: NewStorage(cfg.SupabaseURL, cfg.SupabaseKey, log),
+		tus:   newTusClient(cfg.SupabaseURL, cfg.SupabaseKey, log),
 		proxy: newProxy(cfg.UpstreamURL),
 		log:   log,
 	}
@@ -49,16 +50,18 @@ func (s *Server) notReady() *ingestError {
 	}
 }
 
-// handleProjectUpload pipes the project archive to the server-agent's object
-// store, then asks Node to finalize (identity, language, env crypto, database
-// record) and relays Node's response verbatim.
+// handleProjectUpload streams the project archive to staging, then asks Node
+// to finalize (identity, language, env crypto, database, signed URL) and
+// relays Node's response verbatim.
 func (s *Server) handleProjectUpload(w http.ResponseWriter, r *http.Request) {
 	if err := s.notReady(); err != nil {
 		writeIngestError(w, err)
 		return
 	}
-	res, ierr := s.streamUploadToAgent(r.Context(), r, "UPLOAD_TOO_LARGE")
+	res, ierr := s.streamUploadToStaging(r.Context(), s.cfg.StorageBucket, r, s.cfg.MaxUploadBytes)
 	if ierr != nil {
+		// Logged: storage rejections are otherwise silent (the caller gets a
+		// generic 502), which once left a bundle failure with no trace.
 		s.log.Error("project ingest failed",
 			"status", ierr.status, "code", ierr.code, "message", ierr.message)
 		writeIngestError(w, ierr)
@@ -66,9 +69,7 @@ func (s *Server) handleProjectUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	status, body, err := callFinalize(r.Context(), s.cfg.UpstreamURL, s.cfg.IngestSecret, "/internal/ingest/project", map[string]any{
 		"authorization": r.Header.Get("Authorization"),
-		"agent_url":     s.cfg.AgentStoreURL,
-		"agent_key":     res.agentKey,
-		"ticket":        res.ticket,
+		"staging_path":  res.stagingPath,
 		"sha256":        res.sha256,
 		"bytes":         res.bytes,
 		"filename":      res.filename,
@@ -80,7 +81,7 @@ func (s *Server) handleProjectUpload(w http.ResponseWriter, r *http.Request) {
 		"manifest":      res.fields["manifest"],
 	})
 	if err != nil {
-		s.log.Error("project finalize failed", "error", err, "agent_key", res.agentKey)
+		s.log.Error("project finalize failed", "error", err, "staging", res.stagingPath)
 		writeIngestError(w, &ingestError{status: 502, code: "STORAGE_UNAVAILABLE", message: "Failed to record the project upload"})
 		return
 	}
@@ -103,24 +104,25 @@ func (s *Server) handleBundleUpload(w http.ResponseWriter, r *http.Request) {
 		writeIngestError(w, &ingestError{status: 400, code: "VALIDATION_ERROR", message: "build id is required"})
 		return
 	}
-	res, ierr := s.streamUploadToAgent(r.Context(), r, "BUNDLE_TOO_LARGE")
+	res, ierr := s.streamUploadToStaging(r.Context(), s.cfg.StorageBucket, r, s.cfg.MaxBundleBytes)
 	if ierr != nil {
+		if ierr.status == 413 {
+			ierr = &ingestError{status: 413, code: "BUNDLE_TOO_LARGE", message: ierr.message}
+		}
 		s.log.Error("bundle ingest failed",
 			"build_id", id, "status", ierr.status, "code", ierr.code, "message", ierr.message)
 		writeIngestError(w, ierr)
 		return
 	}
 	status, body, err := callFinalize(r.Context(), s.cfg.UpstreamURL, s.cfg.IngestSecret, "/internal/ingest/bundle", map[string]any{
-		"build_token": r.Header.Get("X-Build-Report-Token"),
-		"build_id":    id,
-		"agent_url":   s.cfg.AgentStoreURL,
-		"agent_key":   res.agentKey,
-		"ticket":      res.ticket,
-		"sha256":      res.sha256,
-		"bytes":       res.bytes,
+		"build_token":  r.Header.Get("X-Build-Report-Token"),
+		"build_id":     id,
+		"staging_path": res.stagingPath,
+		"sha256":       res.sha256,
+		"bytes":        res.bytes,
 	})
 	if err != nil {
-		s.log.Error("bundle finalize failed", "error", err, "build_id", id, "agent_key", res.agentKey)
+		s.log.Error("bundle finalize failed", "error", err, "build_id", id, "staging", res.stagingPath)
 		writeIngestError(w, &ingestError{status: 502, code: "STORAGE_UNAVAILABLE", message: "Failed to record the bundle"})
 		return
 	}
