@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"io"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -14,17 +15,14 @@ import (
 	"testing"
 )
 
-// fakeStore records what the streaming path handed it without touching the
-// network. The test bodies are small, but the production path passes the
-// multipart part reader straight through — nothing in ingest.go ever calls
-// ReadAll or concat on the file bytes.
+// fakeStore records single-shot uploads without touching the network.
 type fakeStore struct {
 	uploaded   map[string][]byte
-	deleted    [][]string
+	sizes      map[string]int64
 	failUpload bool
 }
 
-func (f *fakeStore) Upload(_ context.Context, _ string, path string, body io.Reader, _ string) error {
+func (f *fakeStore) Upload(_ context.Context, _ string, path string, body io.Reader, _ string, size int64) error {
 	if f.failUpload {
 		return errors.New("boom")
 	}
@@ -32,19 +30,71 @@ func (f *fakeStore) Upload(_ context.Context, _ string, path string, body io.Rea
 	if err != nil {
 		return err
 	}
+	if size != int64(len(data)) {
+		return errors.New("declared size does not match streamed bytes")
+	}
 	if f.uploaded == nil {
 		f.uploaded = map[string][]byte{}
+		f.sizes = map[string]int64{}
 	}
 	f.uploaded[path] = data
+	f.sizes[path] = size
 	return nil
 }
 
-func (f *fakeStore) Delete(_ context.Context, _ string, paths []string) error {
-	f.deleted = append(f.deleted, paths)
-	for _, p := range paths {
-		delete(f.uploaded, p)
-	}
+func (f *fakeStore) Delete(_ context.Context, _ string, _ []string) error {
 	return nil
+}
+
+// fakeTus records resumable uploads; it reads through the ReadAt interface
+// exactly as the production client does, so chunking is exercised.
+type tusCall struct {
+	bucket string
+	path   string
+	size   int64
+}
+
+type fakeTus struct {
+	calls  []tusCall
+	stored map[string][]byte
+	fail   bool
+}
+
+func (f *fakeTus) uploadFile(_ context.Context, bucket, path string, r interface {
+	ReadAt(p []byte, off int64) (int, error)
+}, size int64) error {
+	if f.fail {
+		return errors.New("tus boom")
+	}
+	f.calls = append(f.calls, tusCall{bucket, path, size})
+	buf := make([]byte, size)
+	var off int64
+	for off < size {
+		n, err := r.ReadAt(buf[off:], off)
+		off += int64(n)
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if n == 0 {
+			break
+		}
+	}
+	if off != size {
+		return errors.New("short spool read")
+	}
+	if f.stored == nil {
+		f.stored = map[string][]byte{}
+	}
+	f.stored[path] = buf
+	return nil
+}
+
+func testServer(store *fakeStore, tus *fakeTus) *Server {
+	return &Server{
+		store: store,
+		tus:   tus,
+		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
 }
 
 func newMultipartRequest(t *testing.T, fields map[string]string, fileFirst bool, fileField, filename string, fileBody []byte) *http.Request {
@@ -99,8 +149,9 @@ func TestStreamUploadToStaging(t *testing.T) {
 
 	for _, fileFirst := range []bool{true, false} {
 		store := &fakeStore{}
+		srv := testServer(store, &fakeTus{})
 		req := newMultipartRequest(t, fields, fileFirst, "file", "archive.zip", body)
-		res, ierr := streamUploadToStaging(req.Context(), store, "project-uploads", req, 400*1024*1024)
+		res, ierr := srv.streamUploadToStaging(req.Context(), "project-uploads", req, 400*1024*1024)
 		if ierr != nil {
 			t.Fatalf("fileFirst=%v: unexpected error: %v", fileFirst, ierr)
 		}
@@ -128,32 +179,88 @@ func TestStreamUploadToStaging(t *testing.T) {
 		if !bytes.Equal(stored, body) {
 			t.Errorf("fileFirst=%v: stored bytes differ", fileFirst)
 		}
+		if store.sizes[res.stagingPath] != int64(len(body)) {
+			t.Errorf("fileFirst=%v: declared size %d want %d", fileFirst, store.sizes[res.stagingPath], len(body))
+		}
+	}
+}
+
+func TestStreamUploadUsesTusAboveThreshold(t *testing.T) {
+	old := singleShotMaxBytes
+	singleShotMaxBytes = 10
+	defer func() { singleShotMaxBytes = old }()
+
+	body := []byte(strings.Repeat("z", 100))
+	wantSHA := sha256.Sum256(body)
+	store := &fakeStore{}
+	tus := &fakeTus{}
+	srv := testServer(store, tus)
+	req := newMultipartRequest(t, map[string]string{"project_id": "p"}, false, "file", "big.zip", body)
+	res, ierr := srv.streamUploadToStaging(req.Context(), "project-uploads", req, 400*1024*1024)
+	if ierr != nil {
+		t.Fatalf("unexpected error: %v", ierr)
+	}
+	if len(store.uploaded) != 0 {
+		t.Errorf("large body must not use single-shot POST: %v", store.uploaded)
+	}
+	if len(tus.calls) != 1 {
+		t.Fatalf("expected one TUS upload, got %d", len(tus.calls))
+	}
+	call := tus.calls[0]
+	if call.bucket != "project-uploads" || call.size != int64(len(body)) {
+		t.Errorf("wrong TUS call: %+v", call)
+	}
+	if res.stagingPath != call.path {
+		t.Errorf("staging path %q != TUS path %q", res.stagingPath, call.path)
+	}
+	if res.sha256 != hex.EncodeToString(wantSHA[:]) || res.bytes != int64(len(body)) {
+		t.Errorf("wrong hash/size: %+v", res)
+	}
+	if !bytes.Equal(tus.stored[call.path], body) {
+		t.Errorf("TUS-stored bytes differ")
+	}
+}
+
+func TestStreamUploadTusFailure(t *testing.T) {
+	old := singleShotMaxBytes
+	singleShotMaxBytes = 10
+	defer func() { singleShotMaxBytes = old }()
+
+	store := &fakeStore{}
+	tus := &fakeTus{fail: true}
+	srv := testServer(store, tus)
+	req := newMultipartRequest(t, map[string]string{"project_id": "p"}, false, "file", "big.zip", []byte(strings.Repeat("z", 100)))
+	_, ierr := srv.streamUploadToStaging(req.Context(), "project-uploads", req, 400*1024*1024)
+	if ierr == nil {
+		t.Fatal("expected an error when TUS fails")
+	}
+	if ierr.status != 502 {
+		t.Errorf("status=%d want 502", ierr.status)
 	}
 }
 
 func TestStreamUploadTooLarge(t *testing.T) {
 	body := []byte(strings.Repeat("y", 100))
 	store := &fakeStore{}
+	srv := testServer(store, &fakeTus{})
 	req := newMultipartRequest(t, map[string]string{"project_id": "p"}, false, "file", "a.zip", body)
-	_, ierr := streamUploadToStaging(req.Context(), store, "project-uploads", req, 10)
+	_, ierr := srv.streamUploadToStaging(req.Context(), "project-uploads", req, 10)
 	if ierr == nil {
 		t.Fatal("expected an error for an oversize body")
 	}
 	if ierr.status != 413 {
 		t.Errorf("status=%d want 413", ierr.status)
 	}
+	// Rejection happens while spooling locally, before any storage call.
 	if len(store.uploaded) != 0 {
-		t.Errorf("oversize staging object was not cleaned up: %v", store.uploaded)
-	}
-	if len(store.deleted) != 1 {
-		t.Errorf("expected one cleanup delete, got %d", len(store.deleted))
+		t.Errorf("oversize body must never reach storage: %v", store.uploaded)
 	}
 }
 
 func TestStreamUploadMissingFile(t *testing.T) {
-	store := &fakeStore{}
+	srv := testServer(&fakeStore{}, &fakeTus{})
 	req := newMultipartRequest(t, map[string]string{"project_id": "p"}, false, "", "", nil)
-	_, ierr := streamUploadToStaging(req.Context(), store, "project-uploads", req, 400*1024*1024)
+	_, ierr := srv.streamUploadToStaging(req.Context(), "project-uploads", req, 400*1024*1024)
 	if ierr == nil {
 		t.Fatal("expected an error when no file part is present")
 	}
@@ -164,8 +271,9 @@ func TestStreamUploadMissingFile(t *testing.T) {
 
 func TestStreamUploadStorageFailure(t *testing.T) {
 	store := &fakeStore{failUpload: true}
+	srv := testServer(store, &fakeTus{})
 	req := newMultipartRequest(t, map[string]string{"project_id": "p"}, false, "file", "a.zip", []byte("data"))
-	_, ierr := streamUploadToStaging(req.Context(), store, "project-uploads", req, 400*1024*1024)
+	_, ierr := srv.streamUploadToStaging(req.Context(), "project-uploads", req, 400*1024*1024)
 	if ierr == nil {
 		t.Fatal("expected an error when storage fails")
 	}

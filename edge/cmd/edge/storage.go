@@ -15,7 +15,7 @@ import (
 // objectStore is the slice of Supabase Storage the edge needs. Declared as an
 // interface so the streaming path is unit-testable without a network.
 type objectStore interface {
-	Upload(ctx context.Context, bucket, path string, body io.Reader, contentType string) error
+	Upload(ctx context.Context, bucket, path string, body io.Reader, contentType string, size int64) error
 	Delete(ctx context.Context, bucket string, paths []string) error
 }
 
@@ -53,11 +53,16 @@ func escapeObjectPath(p string) string {
 	return strings.Join(segs, "/")
 }
 
-func (s *Storage) Upload(ctx context.Context, bucket, path string, body io.Reader, contentType string) error {
+func (s *Storage) Upload(ctx context.Context, bucket, path string, body io.Reader, contentType string, size int64) error {
 	u := s.base + "/object/" + url.PathEscape(bucket) + "/" + escapeObjectPath(path)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, body)
 	if err != nil {
 		return err
+	}
+	// Known length from the disk spool: matches what storage-js sends and
+	// avoids length-unknown bodies entirely.
+	if size >= 0 {
+		req.ContentLength = size
 	}
 	req.Header.Set("Authorization", "Bearer "+s.key)
 	req.Header.Set("Content-Type", contentType)

@@ -10,6 +10,7 @@ import (
 	"hash"
 	"io"
 	"net/http"
+	"os"
 	"time"
 )
 
@@ -80,13 +81,20 @@ func newStagingID() string {
 	return "stg_" + hex.EncodeToString(b[:])
 }
 
-// streamUploadToStaging reads a multipart body part by part, streaming the
-// single `file` part straight into object storage while hashing it, and
-// collecting the small text fields. Peak extra memory is a few kilobytes of
-// pipe buffers regardless of archive size — this is the OOM fix.
-func streamUploadToStaging(
+// singleShotMaxBytes is the largest object sent as one POST. Past this,
+// Supabase answers 413 EntityTooLarge, so bigger bodies go up by TUS chunks
+// instead. 32MB sits safely under the single-shot cap with margin. A var (not
+// const) so tests can force the TUS branch without 32MB fixtures.
+var singleShotMaxBytes = int64(32 << 20)
+
+// streamUploadToStaging reads a multipart body part by part, spooling the
+// single `file` part to a temp disk file (never RAM) while hashing it, then
+// storing it: one POST for small objects, TUS chunks for large ones. Peak
+// extra memory is kilobytes of buffers plus one 6MB TUS window regardless of
+// archive size — this is the OOM fix — and disk holds at most one transient
+// spool, removed before the response is written.
+func (s *Server) streamUploadToStaging(
 	ctx context.Context,
-	store objectStore,
 	bucket string,
 	r *http.Request,
 	maxBytes int64,
@@ -130,31 +138,61 @@ func streamUploadToStaging(
 		}
 
 		staging := stagingPrefix + newStagingID() + ".zip"
+
+		// Spool to disk for sizing: TUS creation needs the total up front,
+		// and chunk PATCHes need a re-readable source. RAM never holds the
+		// body; the temp file is removed on every path below.
+		tmp, err := os.CreateTemp("", "shipit-upload-*.zip")
+		if err != nil {
+			s.log.Error("upload spool failed", "error", err)
+			return nil, &ingestError{status: 502, code: "STORAGE_UNAVAILABLE", message: "Failed to store the upload"}
+		}
+		dropSpool := func() {
+			_ = tmp.Close()
+			_ = os.Remove(tmp.Name())
+		}
 		ch := &countingHasher{r: part, h: sha256.New()}
 		// maxBytes+1, not maxBytes: an oversize body must be *detected* and
 		// rejected with 413, not silently truncated to exactly the limit.
-		body := io.LimitReader(ch, maxBytes+1)
-		if err := store.Upload(ctx, bucket, staging, body, "application/zip"); err != nil {
+		if _, err := io.Copy(tmp, io.LimitReader(ch, maxBytes+1)); err != nil {
+			dropSpool()
 			return nil, &ingestError{status: 502, code: "STORAGE_UNAVAILABLE", message: "Failed to store the upload"}
 		}
-		res.stagingPath = staging
-		res.sha256 = hex.EncodeToString(ch.h.Sum(nil))
-		res.bytes = ch.n
+		size := ch.n
+		sha := hex.EncodeToString(ch.h.Sum(nil))
 
-		if ch.n > maxBytes {
-			// Best effort: the sweeper reaps anything left behind, but leaving
-			// a known-abandoned 400MB object to the sweeper is sloppy.
-			_ = store.Delete(context.WithoutCancel(ctx), bucket, []string{staging})
+		if size > maxBytes {
+			dropSpool()
 			return nil, &ingestError{
 				status:  413,
 				code:    "UPLOAD_TOO_LARGE",
 				message: fmt.Sprintf("Upload exceeds the %dMB limit", maxBytes/1024/1024),
 			}
 		}
-		if ch.n == 0 {
-			_ = store.Delete(context.WithoutCancel(ctx), bucket, []string{staging})
+		if size == 0 {
+			dropSpool()
 			return nil, &ingestError{status: 400, code: "VALIDATION_ERROR", message: "file is required"}
 		}
+
+		if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+			dropSpool()
+			return nil, &ingestError{status: 502, code: "STORAGE_UNAVAILABLE", message: "Failed to store the upload"}
+		}
+		var storeErr error
+		if size <= singleShotMaxBytes {
+			storeErr = s.store.Upload(ctx, bucket, staging, tmp, "application/zip", size)
+		} else {
+			s.log.Info("large upload, switching to TUS",
+				"bucket", bucket, "staging", staging, "bytes", size)
+			storeErr = s.tus.uploadFile(ctx, bucket, staging, tmp, size)
+		}
+		dropSpool()
+		if storeErr != nil {
+			return nil, &ingestError{status: 502, code: "STORAGE_UNAVAILABLE", message: "Failed to store the upload"}
+		}
+		res.stagingPath = staging
+		res.sha256 = sha
+		res.bytes = size
 	}
 	if res.stagingPath == "" {
 		return nil, &ingestError{status: 400, code: "VALIDATION_ERROR", message: "file is required"}

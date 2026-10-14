@@ -11,6 +11,7 @@ import (
 type Server struct {
 	cfg   Config
 	store objectStore
+	tus   tusUploader
 	proxy http.Handler
 	log   *slog.Logger
 }
@@ -19,6 +20,7 @@ func NewServer(cfg Config, log *slog.Logger) *Server {
 	return &Server{
 		cfg:   cfg,
 		store: NewStorage(cfg.SupabaseURL, cfg.SupabaseKey, log),
+		tus:   newTusClient(cfg.SupabaseURL, cfg.SupabaseKey, log),
 		proxy: newProxy(cfg.UpstreamURL),
 		log:   log,
 	}
@@ -56,7 +58,7 @@ func (s *Server) handleProjectUpload(w http.ResponseWriter, r *http.Request) {
 		writeIngestError(w, err)
 		return
 	}
-	res, ierr := streamUploadToStaging(r.Context(), s.store, s.cfg.StorageBucket, r, s.cfg.MaxUploadBytes)
+	res, ierr := s.streamUploadToStaging(r.Context(), s.cfg.StorageBucket, r, s.cfg.MaxUploadBytes)
 	if ierr != nil {
 		// Logged: storage rejections are otherwise silent (the caller gets a
 		// generic 502), which once left a bundle failure with no trace.
@@ -102,7 +104,7 @@ func (s *Server) handleBundleUpload(w http.ResponseWriter, r *http.Request) {
 		writeIngestError(w, &ingestError{status: 400, code: "VALIDATION_ERROR", message: "build id is required"})
 		return
 	}
-	res, ierr := streamUploadToStaging(r.Context(), s.store, s.cfg.StorageBucket, r, s.cfg.MaxBundleBytes)
+	res, ierr := s.streamUploadToStaging(r.Context(), s.cfg.StorageBucket, r, s.cfg.MaxBundleBytes)
 	if ierr != nil {
 		if ierr.status == 413 {
 			ierr = &ingestError{status: 413, code: "BUNDLE_TOO_LARGE", message: ierr.message}
