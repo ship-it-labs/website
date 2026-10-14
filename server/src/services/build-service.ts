@@ -1,6 +1,7 @@
 import { supabase } from "../db/index.js";
 import { Build } from "../types/index.js";
 import { logger } from "../utils/logger.js";
+import { isAgentStoreUrl } from "../utils/agent-store.js";
 import { v4 as uuidv4 } from "uuid";
 
 // Read per call, not captured at import: the admin panel can rotate these
@@ -77,13 +78,19 @@ export async function triggerGitHubActionsBuild(
     throw new Error("Project has no uploaded source");
   }
 
-  // A fresh signed URL is minted per build so the runner never receives a
-  // long-lived or user-visible download link.
-  const { data: signed, error: signError } = await supabase.storage
-    .from("project-uploads")
-    .createSignedUrl(project.upload_path!, 60 * 15);
-
-  const sourceUrl = signed?.signedUrl ?? project.upload_url;
+  // Agent-stored archives carry their own long-lived ticket URL: use it as-is.
+  // Supabase objects get a fresh short-lived signature so the runner never
+  // receives a long-lived or user-visible download link.
+  const projectUrl = project.upload_url as string | null;
+  let sourceUrl: string | null;
+  if (projectUrl && isAgentStoreUrl(projectUrl)) {
+    sourceUrl = projectUrl;
+  } else {
+    const { data: signed } = await supabase.storage
+      .from("project-uploads")
+      .createSignedUrl(project.upload_path!, 60 * 15);
+    sourceUrl = signed?.signedUrl ?? projectUrl;
+  }
   if (!sourceUrl) {
     await supabase
       .from("builds")

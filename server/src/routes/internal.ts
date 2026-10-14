@@ -63,17 +63,19 @@ export async function internalIngestRoutes(app: FastifyInstance): Promise<void> 
   }, async (req, reply) => {
     const b = (req.body ?? {}) as LooseBody;
     const requestedId = str(b.project_id);
-    const stagingPath = str(b.staging_path);
+    const agentUrl = str(b.agent_url);
+    const agentKey = str(b.agent_key);
+    const ticket = str(b.ticket);
     const sha256 = str(b.sha256);
     const bytes = num(b.bytes);
 
-    if (!requestedId || !stagingPath || !sha256 || !Number.isInteger(bytes) || bytes <= 0) {
+    if (!requestedId || !agentUrl || !agentKey || !ticket || !sha256 || !Number.isInteger(bytes) || bytes <= 0) {
       return reply.send({
         status: 400,
         body: {
           error: {
             code: "VALIDATION_ERROR",
-            message: "project_id, staging_path, sha256 and a positive bytes are required",
+            message: "project_id, agent_url, agent_key, ticket, sha256 and a positive bytes are required",
           },
         },
       });
@@ -101,7 +103,7 @@ export async function internalIngestRoutes(app: FastifyInstance): Promise<void> 
       envRaw: typeof b.env === "string" ? b.env : null,
       manifest,
       filename: str(b.filename) || null,
-      store: { kind: "staging", path: stagingPath, sha256, bytes },
+      store: { kind: "agent", agentUrl, key: agentKey, sha256, bytes, ticket },
     });
     return reply.send({ status: outcome.status, body: outcome.body });
   });
@@ -122,17 +124,19 @@ export async function internalIngestRoutes(app: FastifyInstance): Promise<void> 
     }
 
     const buildId = str(b.build_id);
-    const stagingPath = str(b.staging_path);
+    const agentUrl = str(b.agent_url);
+    const agentKey = str(b.agent_key);
+    const ticket = str(b.ticket);
     const sha256 = str(b.sha256);
     const bytes = num(b.bytes);
 
-    if (!buildId || !stagingPath || !sha256 || !Number.isInteger(bytes) || bytes <= 0) {
+    if (!buildId || !agentUrl || !agentKey || !ticket || !sha256 || !Number.isInteger(bytes) || bytes <= 0) {
       return reply.send({
         status: 400,
         body: {
           error: {
             code: "VALIDATION_ERROR",
-            message: "build_id, staging_path, sha256 and a positive bytes are required",
+            message: "build_id, agent_url, agent_key, ticket, sha256 and a positive bytes are required",
           },
         },
       });
@@ -149,7 +153,7 @@ export async function internalIngestRoutes(app: FastifyInstance): Promise<void> 
 
     const outcome = await finalizeBundleUpload({
       buildId,
-      store: { kind: "staging", path: stagingPath, sha256, bytes },
+      store: { kind: "agent", agentUrl, key: agentKey, sha256, bytes, ticket },
     });
     return reply.send({ status: outcome.status, body: outcome.body });
   });
