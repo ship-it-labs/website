@@ -85,6 +85,7 @@ create table if not exists public.projects (
   file_count integer not null default 0,
   agent_id text,
   agent_url text,
+  last_activity_at timestamptz not null default now(),
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

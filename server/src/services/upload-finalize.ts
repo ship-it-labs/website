@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { supabase } from "../db/index.js";
 import { logger } from "../utils/logger.js";
+import { copyStagedObject, deleteStagedObjects } from "./object-store.js";
 import { resolveLanguage } from "./languages.js";
 import { resolveProjectId } from "./project-identity.js";
 import { recordBundleArtifact, getBuild } from "./build-service.js";
@@ -33,9 +34,14 @@ export const BUNDLE_BUCKET = "project-uploads";
 
 export type UploadStore =
   | { kind: "buffer"; data: Buffer }
-  // Bytes already persisted on a server-agent's disk by the edge. Nothing to
-  // move or sign: the fetch URL below is what runtime starters GET (ticket in
-  // query, sha verified on arrival), on this host or a sibling.
+  // Bytes the Go edge already streamed to a Supabase staging object. Node
+  // moves them server-side to the final key (no download), then reaps the
+  // staging copy. Used by project uploads through the edge.
+  | { kind: "staging"; path: string; sha256: string; bytes: number }
+  // Bytes already persisted on a server-agent's disk by a live delivery.
+  // Nothing to move or sign: the fetch URL below is what runtime starters
+  // GET (ticket in query, sha verified on arrival). Used only by bundle
+  // deliveries forwarded to the host of a running runtime.
   | {
       kind: "agent";
       agentId: string;
@@ -60,7 +66,7 @@ export interface ProjectFinalizeInput {
 
 export interface BundleFinalizeInput {
   buildId: string;
-  store: UploadStore;
+  store: Extract<UploadStore, { kind: "agent" }>;
 }
 
 export interface FinalizeOutcome {
@@ -109,44 +115,98 @@ export async function projectStoreAgentColumns(
 async function placeObject(
   bucket: string,
   storagePath: string,
-  // Buffer only: the direct-to-Node path (local development and callers
-  // reaching Node without the edge). Agent bytes are already stored; edge
-  // callers never reach here.
-  data: Buffer,
+  // Buffer: the direct-to-Node path (local development and callers reaching
+  // Node without the edge). Staging: the edge already streamed the bytes to
+  // Supabase; only a server-side move to the final key is left.
+  store: UploadStore,
   // Projects mint a fresh upload id per upload so they must never overwrite;
   // bundles reuse one key per build id so re-uploads replace.
   upsert: boolean,
   logCtx: Record<string, unknown>
 ): Promise<{ ok: true } | { ok: false; outcome: FinalizeOutcome }> {
-  const { error: uploadError } = await supabase.storage
-    .from(bucket)
-    .upload(storagePath, data, {
-      contentType: "application/zip",
-      upsert,
-    });
-  if (uploadError) {
-    logger.error({ err: uploadError, ...logCtx }, "Storage upload failed");
-    return {
-      ok: false,
-      outcome: {
-        status: 502,
-        body: { error: { code: "STORAGE_UNAVAILABLE", message: "Failed to store the upload" } },
-      },
-    };
+  if (store.kind === "buffer") {
+    const { error: uploadError } = await supabase.storage
+      .from(bucket)
+      .upload(storagePath, store.data, {
+        contentType: "application/zip",
+        upsert,
+      });
+    if (uploadError) {
+      logger.error({ err: uploadError, ...logCtx }, "Storage upload failed");
+      return {
+        ok: false,
+        outcome: {
+          status: 502,
+          body: { error: { code: "STORAGE_UNAVAILABLE", message: "Failed to store the upload" } },
+        },
+      };
+    }
+    return { ok: true };
   }
-  return { ok: true };
+
+  if (store.kind === "staging") {
+    try {
+      await copyStagedObject(bucket, store.path, storagePath);
+    } catch (err) {
+      logger.error({ err, ...logCtx, staging: store.path }, "Staging copy failed");
+      return {
+        ok: false,
+        outcome: {
+          status: 502,
+          body: { error: { code: "STORAGE_UNAVAILABLE", message: "Failed to store the upload" } },
+        },
+      };
+    }
+    // Best effort: the object is safely at its final key, so a failed
+    // cleanup must not fail the upload. The staging sweeper reaps leftovers.
+    try {
+      await deleteStagedObjects(bucket, [store.path]);
+    } catch (err) {
+      logger.warn({ err, ...logCtx, staging: store.path }, "Staging cleanup failed; sweeper will reap it");
+    }
+    return { ok: true };
+  }
+
+  return {
+    ok: false,
+    outcome: {
+      status: 400,
+      body: { error: { code: "VALIDATION_ERROR", message: "Project uploads arrive buffered or staged, never agent-stored" } },
+    },
+  };
+}
+
+/** Best-effort activity touch: a failed touch must never fail the upload or
+ * start it records. Missing-column tolerant (pre-0028 databases). */
+export async function touchProjectActivity(projectId: string): Promise<void> {
+  try {
+    const { error } = await supabase
+      .from("projects")
+      .update({ last_activity_at: new Date().toISOString() })
+      .eq("id", projectId);
+    if (error && !isMissingColumnError(error)) throw error;
+  } catch (err) {
+    logger.debug({ err, projectId }, "Activity touch skipped");
+  }
 }
 
 export async function finalizeProjectUpload(input: ProjectFinalizeInput): Promise<FinalizeOutcome> {
   const { userId, requestedId } = input;
-  const isAgent = input.store.kind === "agent";
   const { sha256, bytes } =
     input.store.kind === "buffer"
       ? {
           sha256: crypto.createHash("sha256").update(input.store.data).digest("hex"),
           bytes: input.store.data.length,
         }
-      : { sha256: input.store.sha256, bytes: input.store.bytes };
+      : input.store.kind === "staging"
+        ? { sha256: input.store.sha256, bytes: input.store.bytes }
+        : { sha256: "", bytes: 0 };
+  if (!sha256 || bytes <= 0) {
+    return {
+      status: 400,
+      body: { error: { code: "VALIDATION_ERROR", message: "Project uploads arrive buffered or staged, never agent-stored" } },
+    };
+  }
 
   // The requested id is the primary key, so a slug already owned by another
   // account must never be written: that would move their project to us.
@@ -164,40 +224,26 @@ export async function finalizeProjectUpload(input: ProjectFinalizeInput): Promis
   });
 
   const uploadId = `up_${crypto.randomUUID().slice(0, 12)}`;
-  // Agent-stored bytes already live at their final key; upload_path records it
-  // for reference and cleanup, and no Supabase placement happens.
-  const storagePath = isAgent
-    ? (input.store as { key: string }).key
-    : `${userId}/${resolvedId}/${uploadId}.zip`;
+  // Fresh key per upload: re-uploads never overwrite, so a failed finalize
+  // can never leave a half-written object behind under a live key.
+  const storagePath = `${userId}/${resolvedId}/${uploadId}.zip`;
   const logCtx = { userId, projectId: requestedId, resolvedId, uploadId };
 
-  let signedUrl: string;
-  if (isAgent) {
-    const agent = input.store as { agentUrl: string; key: string; ticket: string };
-    signedUrl = agentStoreUrl(agent.agentUrl, agent.key, agent.ticket);
-  } else {
-    const placed = await placeObject(
-      PROJECT_BUCKET,
-      storagePath,
-      (input.store as { kind: "buffer"; data: Buffer }).data,
-      false,
-      logCtx
-    );
-    if (!placed.ok) return placed.outcome;
+  const placed = await placeObject(PROJECT_BUCKET, storagePath, input.store, false, logCtx);
+  if (!placed.ok) return placed.outcome;
 
-    const { data: signed, error: signError } = await supabase.storage
-      .from(PROJECT_BUCKET)
-      .createSignedUrl(storagePath, 60 * 30);
+  const { data: signed, error: signError } = await supabase.storage
+    .from(PROJECT_BUCKET)
+    .createSignedUrl(storagePath, 60 * 30);
 
-    if (signError || !signed?.signedUrl) {
-      logger.error({ err: signError, ...logCtx }, "Failed to sign upload URL");
-      return {
-        status: 502,
-        body: { error: { code: "STORAGE_UNAVAILABLE", message: "Failed to sign the project archive" } },
-      };
-    }
-    signedUrl = signed.signedUrl;
+  if (signError || !signed?.signedUrl) {
+    logger.error({ err: signError, ...logCtx }, "Failed to sign upload URL");
+    return {
+      status: 502,
+      body: { error: { code: "STORAGE_UNAVAILABLE", message: "Failed to sign the project archive" } },
+    };
   }
+  const signedUrl = signed.signedUrl;
 
   const now = new Date().toISOString();
 
@@ -264,58 +310,35 @@ export async function finalizeProjectUpload(input: ProjectFinalizeInput): Promis
     }
   }
 
-  // Agent home is recorded so re-uploads land on the same host and runtime
-  // starts pin back to it. An upsert carrying unknown columns fails the whole
-  // write (PGRST204 / no-such-column when migration 0027 hasn't run), so on
-  // exactly that error the write retries without the agent columns: the
+  // last_activity_at drives the storage-retention sweeper (free 24h, pro 3d,
+  // ultra 7d of inactivity). An upsert carrying unknown columns fails the
+  // whole write (PGRST204 / no-such-column when a migration hasn't run), so
+  // on exactly that error the write retries without the activity column: the
   // upload itself must never 500 over bookkeeping.
-  const agentCols =
-    input.store.kind === "agent"
-      ? { agent_id: input.store.agentId || null, agent_url: input.store.agentUrl || null }
-      : {};
+  const projectRow = {
+    id: resolvedId,
+    user_id: userId,
+    name: input.projectName || resolvedId,
+    run_command: input.runCommand,
+    language: resolved.language,
+    env_ciphertext: envCiphertext,
+    upload_id: uploadId,
+    upload_path: storagePath,
+    upload_url: signedUrl,
+    upload_sha256: sha256,
+    upload_bytes: bytes,
+    file_count: input.manifest?.files?.length ?? 0,
+    last_activity_at: now,
+    updated_at: now,
+  };
   let projectError: unknown;
   {
-    const attempt = await supabase.from("projects").upsert(
-      {
-        id: resolvedId,
-        user_id: userId,
-        name: input.projectName || resolvedId,
-        run_command: input.runCommand,
-        language: resolved.language,
-        env_ciphertext: envCiphertext,
-        upload_id: uploadId,
-        upload_path: storagePath,
-        upload_url: signedUrl,
-        upload_sha256: sha256,
-        upload_bytes: bytes,
-        file_count: input.manifest?.files?.length ?? 0,
-        updated_at: now,
-        ...agentCols,
-      },
-      { onConflict: "id" }
-    );
+    const attempt = await supabase.from("projects").upsert(projectRow, { onConflict: "id" });
     projectError = attempt.error;
-    if (projectError && isMissingColumnError(projectError) && Object.keys(agentCols).length > 0) {
-      logger.warn({ ...logCtx }, "Agent columns missing; recording upload without affinity");
-      const retry = await supabase.from("projects").upsert(
-        {
-          id: resolvedId,
-          user_id: userId,
-          name: input.projectName || resolvedId,
-          run_command: input.runCommand,
-          language: resolved.language,
-          env_ciphertext: envCiphertext,
-          upload_id: uploadId,
-          upload_path: storagePath,
-          upload_url: signedUrl,
-          upload_sha256: sha256,
-          upload_bytes: bytes,
-          file_count: input.manifest?.files?.length ?? 0,
-          updated_at: now,
-        },
-        { onConflict: "id" }
-      );
-      projectError = retry.error;
+    if (projectError && isMissingColumnError(projectError)) {
+      logger.warn({ ...logCtx }, "Activity column missing; recording upload without it");
+      const { last_activity_at: _dropped, ...legacyRow } = projectRow;
+      projectError = (await supabase.from("projects").upsert(legacyRow, { onConflict: "id" })).error;
     }
   }
 
@@ -350,36 +373,19 @@ export async function finalizeProjectUpload(input: ProjectFinalizeInput): Promis
 
 export async function finalizeBundleUpload(input: BundleFinalizeInput): Promise<FinalizeOutcome> {
   const { buildId } = input;
-  const { sha256, bytes } =
-    input.store.kind === "buffer"
-      ? {
-          sha256: crypto.createHash("sha256").update(input.store.data).digest("hex"),
-          bytes: input.store.data.length,
-        }
-      : { sha256: input.store.sha256, bytes: input.store.bytes };
-
-  // Replace semantics: re-uploads overwrite the same key. Agent-stored bytes
-  // already live at their key; recordBundleArtifact stores the string it is
-  // given into the artifacts `url` column, so the agent fetch URL goes there
-  // directly and starters GET it like any other URL.
-  const isAgent = input.store.kind === "agent";
-  const storagePath = isAgent
-    ? agentStoreUrl(
-        (input.store as { agentUrl: string }).agentUrl,
-        (input.store as { key: string }).key,
-        (input.store as { ticket: string }).ticket
-      )
-    : `bundles/${buildId}.zip`;
-  if (!isAgent) {
-    const placed = await placeObject(
-      BUNDLE_BUCKET,
-      storagePath,
-      (input.store as { kind: "buffer"; data: Buffer }).data,
-      true,
-      { buildId }
-    );
-    if (!placed.ok) return placed.outcome;
+  if (input.store.kind !== "agent" || !input.store.sha256 || input.store.bytes <= 0) {
+    return {
+      status: 400,
+      body: { error: { code: "VALIDATION_ERROR", message: "Bundles arrive via live delivery to the running runtime's host" } },
+    };
   }
+  const sha256 = input.store.sha256;
+  const bytes = input.store.bytes;
+
+  // The storing host's fetch URL goes into the artifacts `url` column
+  // directly, and starters GET it like any other URL (ticket in query, sha
+  // verified on arrival).
+  const storagePath = agentStoreUrl(input.store.agentUrl, input.store.key, input.store.ticket);
 
   try {
     await recordBundleArtifact(buildId, {
@@ -394,29 +400,26 @@ export async function finalizeBundleUpload(input: BundleFinalizeInput): Promise<
     };
   }
 
-  // Align the project with the bundle's home host when it has none yet, so
-  // the next runtime start pins to where both artifacts live. Best-effort and
-  // missing-column tolerant; a legacy project keeps working without affinity.
-  // Read-then-write (not an `is null` filter) because the local sqlite
-  // stand-in has no `.is()`; an indexed point read is cheap either way.
-  if (isAgent) {
-    try {
-      const agent = input.store as { agentId: string; agentUrl: string };
-      const build = await getBuild(buildId);
-      const projectId = (build as { project_id?: string } | null)?.project_id;
-      if (projectId && agent.agentUrl) {
-        const current = await projectStoreAgentColumns(projectId);
-        if (current && !current.agent_id && !current.agent_url) {
-          const { error } = await supabase
-            .from("projects")
-            .update({ agent_id: agent.agentId || null, agent_url: agent.agentUrl })
-            .eq("id", projectId);
-          if (error && !isMissingColumnError(error)) throw error;
-        }
-      }
-    } catch (err) {
-      logger.warn({ err, buildId }, "Bundle home alignment skipped");
+  // The freshest bundle wins the home: starts pin to the host holding it so
+  // the fetch is local. Best-effort and missing-column tolerant; a legacy
+  // project keeps working without affinity (least-loaded routing + source).
+  try {
+    const build = await getBuild(buildId);
+    const projectId = (build as { project_id?: string } | null)?.project_id;
+    if (projectId) {
+      const { error } = await supabase
+        .from("projects")
+        .update({
+          agent_id: input.store.agentId || null,
+          agent_url: input.store.agentUrl,
+          last_activity_at: new Date().toISOString(),
+        })
+        .eq("id", projectId);
+      if (error && !isMissingColumnError(error)) throw error;
+      if (error) await touchProjectActivity(projectId);
     }
+  } catch (err) {
+    logger.warn({ err, buildId }, "Bundle home alignment skipped");
   }
 
   logger.info({ buildId, bytes, sha256 }, "Recorded runtime bundle");

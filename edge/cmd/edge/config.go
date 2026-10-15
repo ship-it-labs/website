@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -24,13 +25,16 @@ type Config struct {
 	NodeMaxOldSpace string
 	// IngestSecret authenticates the container-internal finalize calls.
 	IngestSecret string
-	// OrchestratorURL/OrchestratorSecret point at the server-orchestrator,
-	// which picks the storing agent (random healthy, or the project's home)
-	// and pipes bytes through to it. The edge holds no agent addresses and no
-	// agent secret — same service secret the control plane already uses. The
-	// 20GB size cap lives on the storing agent, which answers 413 past it.
-	OrchestratorURL    string
-	OrchestratorSecret string
+	// SupabaseURL/SupabaseKey let the edge stream bytes straight to object
+	// storage without routing them through Node's heap.
+	SupabaseURL string
+	SupabaseKey string
+	// StorageBucket holds both the staging/ prefix and final objects.
+	StorageBucket string
+	// MaxUploadBytes/MaxBundleBytes mirror the Node-side caps so an abusive
+	// body is rejected at the edge instead of after a full upstream read.
+	MaxUploadBytes int64
+	MaxBundleBytes int64
 }
 
 func envOr(key, def string) string {
@@ -38,6 +42,18 @@ func envOr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+func envInt64(key string, def int64) int64 {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
 }
 
 func splitArgs(s string) []string {
@@ -58,15 +74,18 @@ func loadConfig() Config {
 		NodeEntry:       envOr("NODE_ENTRY", "dist/index.js"),
 		NodeArgs:        splitArgs(os.Getenv("NODE_ARGS")),
 		NodeMaxOldSpace: envOr("NODE_MAX_OLD_SPACE_MB", "384"),
-		IngestSecret:       os.Getenv("INTERNAL_INGEST_SECRET"),
-		OrchestratorURL:    os.Getenv("ORCHESTRATOR_URL"),
-		OrchestratorSecret: os.Getenv("ORCHESTRATOR_SECRET"),
+		IngestSecret:    os.Getenv("INTERNAL_INGEST_SECRET"),
+		SupabaseURL:     os.Getenv("SUPABASE_URL"),
+		SupabaseKey:     os.Getenv("SUPABASE_SERVICE_ROLE_KEY"),
+		StorageBucket:   envOr("STORAGE_BUCKET", "project-uploads"),
+		MaxUploadBytes:  envInt64("MAX_UPLOAD_BYTES", 400*1024*1024),
+		MaxBundleBytes:  envInt64("MAX_BUNDLE_BYTES", 300*1024*1024),
 	}
 }
 
-// ingestReady reports whether the edge can actually store an upload. A
+// ingestReady reports whether the edge can actually finalize an upload. A
 // missing piece must read as a loud 503 at request time (and a boot warning),
-// never as bytes accepted with nowhere to put them.
+// never as a half-written object with no database row behind it.
 func (c Config) ingestReady() bool {
-	return c.IngestSecret != "" && c.OrchestratorURL != "" && c.OrchestratorSecret != ""
+	return c.IngestSecret != "" && c.SupabaseURL != "" && c.SupabaseKey != "" && c.StorageBucket != ""
 }

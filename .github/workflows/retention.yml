@@ -1,0 +1,43 @@
+name: Storage retention sweep
+
+# Hourly: deletes the Supabase zips of projects idle past their tier budget
+# (free 24h, pro 3 days, ultra 7 days). Rows, builds and history are untouched.
+# The endpoint is idempotent, so overlapping or retried runs simply no-op.
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "List what would be wiped without deleting"
+        required: false
+        default: "false"
+
+permissions:
+  contents: read
+
+jobs:
+  sweep:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Run retention sweep
+        env:
+          PLATFORM_API_URL: ${{ vars.PLATFORM_API_URL }}
+          INGEST_SECRET: ${{ secrets.INTERNAL_INGEST_SECRET }}
+          REPORT_TOKEN: ${{ secrets.BUILD_REPORT_TOKEN }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ -z "$PLATFORM_API_URL" ] || [ -z "$INGEST_SECRET" ] || [ -z "$REPORT_TOKEN" ]; then
+            echo "::error::PLATFORM_API_URL, INTERNAL_INGEST_SECRET and BUILD_REPORT_TOKEN must all be set"
+            exit 1
+          fi
+          dry_run="${DRY_RUN:-false}"
+          body=$(jq -n --argjson dry_run "$([ "$dry_run" = "true" ] && echo true || echo false)" \
+            '{build_token: $ENV.REPORT_TOKEN, dry_run: $dry_run}')
+          curl -fsS --retry 5 --retry-delay 10 --retry-all-errors \
+            -X POST "$PLATFORM_API_URL/internal/retention/sweep" \
+            -H "x-ingest-secret: $INGEST_SECRET" \
+            -H "Content-Type: application/json" \
+            -d "$body"

@@ -205,7 +205,9 @@ export function DashboardPage() {
     buildFilter === "all" ? builds : builds.filter((b) => b.status === buildFilter);
 
   const runtimePager = useShowMore(visibleRuntimes, 8);
-  const buildPager = useShowMore(visibleBuilds, 8);
+  // Builds show the last 3 with a loader for the rest: the dashboard is a
+  // status glance, not an archive (the admin panel paginates everything).
+  const buildPager = useShowMore(visibleBuilds, 3);
 
   const flashCopied = (key: string) => {
     setCopied(key);
@@ -599,7 +601,7 @@ export function DashboardPage() {
               expanded={buildPager.expanded}
               hidden={buildPager.hidden}
               onToggle={buildPager.toggle}
-              expandLabel={(n) => `Show ${n} more builds`}
+              expandLabel={(n) => `Load ${n} more builds`}
             />
             </>
           )}

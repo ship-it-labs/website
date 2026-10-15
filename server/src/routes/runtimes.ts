@@ -7,7 +7,7 @@ import { callOrchestrator } from "../services/orchestrator-client.js";
 import { latestBundleArtifact } from "../services/build-service.js";
 import { decryptEnvVars, projectEnvKey } from "../utils/env-crypto.js";
 import { isAgentStoreUrl } from "../utils/agent-store.js";
-import { projectStoreAgentColumns } from "../services/upload-finalize.js";
+import { projectStoreAgentColumns, touchProjectActivity } from "../services/upload-finalize.js";
 import { logger } from "../utils/logger.js";
 
 const startSchema = z.object({
@@ -90,8 +90,19 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
     }
 
     // Agent-stored archives carry their own ticket URL: use it as-is. Supabase
-    // objects get a fresh internal signature the agent can reach.
+    // objects get a fresh internal signature the agent can reach. A wiped
+    // project (retention deleted its zip) has neither: fail with re-upload
+    // guidance instead of a cryptic storage error downstream.
     const storedProjectUrl = (project as { upload_url?: string | null }).upload_url ?? null;
+    const storedProjectPath = (project as { upload_path?: string | null }).upload_path ?? null;
+    if (!storedProjectUrl && !storedProjectPath) {
+      return reply.status(410).send({
+        error: {
+          code: "SOURCE_EXPIRED",
+          message: "This project's archive was deleted after inactivity. Re-upload it to start a runtime.",
+        },
+      });
+    }
 
     // Home-agent affinity: when this project's files live on one host's disk,
     // the start pins to that host so archives read locally. Missing columns
@@ -205,6 +216,10 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
           plan_id: req.auth!.plan.id,
         },
       }, 30_000, WITH_SINGLE_502_RETRY);
+
+      // A successful start is activity: it holds the project's zip past the
+      // retention sweeper. Best-effort and never fatal to the start itself.
+      await touchProjectActivity(projectId);
 
       return reply.status(202).send(result);
     } catch (err) {

@@ -42,6 +42,9 @@ const ADDED_COLUMNS: { table: string; column: string; definition: string }[] = [
   { table: "projects", column: "language", definition: "text" },
   { table: "projects", column: "env_ciphertext", definition: "text" },
   { table: "builds", column: "language", definition: "text" },
+  // Storage-retention activity stamp (see 0028). Nullable so pre-migration
+  // rows read as ancient and drain out on the first sweep; new writes stamp.
+  { table: "projects", column: "last_activity_at", definition: "text" },
 ];
 
 /** Columns removed from the schema, dropped from existing databases. */
@@ -192,6 +195,7 @@ create table if not exists projects (
   env_ciphertext text,
   agent_id text,
   agent_url text,
+  last_activity_at text,
   created_at text not null default (datetime('now')),
   updated_at text not null default (datetime('now'))
 );

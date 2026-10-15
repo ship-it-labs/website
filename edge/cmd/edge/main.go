@@ -21,7 +21,7 @@ func main() {
 		// Dying here would take down health checks and the dashboard over an
 		// upload path nobody may be using yet.
 		log.Warn("ingest storage is not configured; upload routes will return 503",
-			"hint", "set INTERNAL_INGEST_SECRET, ORCHESTRATOR_URL and ORCHESTRATOR_SECRET")
+			"hint", "set INTERNAL_INGEST_SECRET, SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

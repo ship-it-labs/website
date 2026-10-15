@@ -2,109 +2,99 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"strings"
-	"sync"
 	"testing"
 )
 
-// mockOrchestrator implements the orchestrator store endpoint: it checks the
-// service secret, records the preferred header, streams the body (hashing
-// it), and answers with a receipt like the real forwarder.
-type mockOrchestrator struct {
-	t            *testing.T
-	mu           sync.Mutex
-	secret       string
-	received     []byte
-	preferred    []string
-	puts         int
-	cap          int64
-	failStatus   int
-	agentID      string
-	agentURL     string
-	key          string
-	ticket       string
+// fakeStore records single-shot uploads without touching the network.
+type fakeStore struct {
+	uploaded   map[string][]byte
+	sizes      map[string]int64
+	failUpload bool
 }
 
-func (m *mockOrchestrator) handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/store/put", func(w http.ResponseWriter, r *http.Request) {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		if r.Header.Get("X-Service-Secret") != m.secret {
-			http.Error(w, `{"error":{"code":"UNAUTHORIZED","message":"bad secret"}}`, http.StatusUnauthorized)
-			return
-		}
-		m.preferred = append(m.preferred, r.Header.Get("X-Preferred-Agent"))
-		if m.failStatus > 0 {
-			http.Error(w, `{"error":{"code":"STORE_FAILED","message":"forced"}}`, m.failStatus)
-			return
-		}
-		body, err := io.ReadAll(io.LimitReader(r.Body, m.cap+1))
-		if err != nil {
-			http.Error(w, "unreadable", http.StatusBadRequest)
-			return
-		}
-		if int64(len(body)) > m.cap {
-			http.Error(w, `{"error":{"code":"OBJECT_TOO_LARGE","message":"too large"}}`, http.StatusRequestEntityTooLarge)
-			return
-		}
-		m.received = body
-		m.puts++
-		sum := sha256.Sum256(body)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusCreated)
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"agent_id":  m.agentID,
-			"agent_url": m.agentURL,
-			"key":       m.key,
-			"sha256":    hex.EncodeToString(sum[:]),
-			"bytes":     len(body),
-			"ticket":    m.ticket,
-		})
-	})
-	return mux
+func (f *fakeStore) Upload(_ context.Context, _ string, path string, body io.Reader, _ string, size int64) error {
+	if f.failUpload {
+		return errors.New("boom")
+	}
+	data, err := io.ReadAll(body)
+	if err != nil {
+		return err
+	}
+	if size != int64(len(data)) {
+		return errors.New("declared size does not match streamed bytes")
+	}
+	if f.uploaded == nil {
+		f.uploaded = map[string][]byte{}
+		f.sizes = map[string]int64{}
+	}
+	f.uploaded[path] = data
+	f.sizes[path] = size
+	return nil
 }
 
-// mockNodeResolve answers the home-agent lookup with a fixed home (possibly
-// empty), proving the edge forwards the preference.
-type mockNodeResolve struct {
-	agentID  string
-	agentURL string
-	calls    int
-	mu       sync.Mutex
+func (f *fakeStore) Delete(_ context.Context, _ string, _ []string) error {
+	return nil
 }
 
-func (m *mockNodeResolve) handler() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/internal/store-agent/project", func(w http.ResponseWriter, r *http.Request) {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		m.calls++
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"agent_id":  m.agentID,
-			"agent_url": m.agentURL,
-		})
-	})
-	mux.HandleFunc("/internal/store-agent/bundle", func(w http.ResponseWriter, r *http.Request) {
-		m.mu.Lock()
-		defer m.mu.Unlock()
-		m.calls++
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
-			"agent_id":  m.agentID,
-			"agent_url": m.agentURL,
-		})
-	})
-	return mux
+// fakeTus records resumable uploads; it reads through the ReadAt interface
+// exactly as the production client does, so chunking is exercised.
+type tusCall struct {
+	bucket string
+	path   string
+	size   int64
+}
+
+type fakeTus struct {
+	calls  []tusCall
+	stored map[string][]byte
+	fail   bool
+}
+
+func (f *fakeTus) uploadFile(_ context.Context, bucket, path string, r interface {
+	ReadAt(p []byte, off int64) (int, error)
+}, size int64) error {
+	if f.fail {
+		return errors.New("tus boom")
+	}
+	f.calls = append(f.calls, tusCall{bucket, path, size})
+	buf := make([]byte, size)
+	var off int64
+	for off < size {
+		n, err := r.ReadAt(buf[off:], off)
+		off += int64(n)
+		if err != nil && err != io.EOF {
+			return err
+		}
+		if n == 0 {
+			break
+		}
+	}
+	if off != size {
+		return errors.New("short spool read")
+	}
+	if f.stored == nil {
+		f.stored = map[string][]byte{}
+	}
+	f.stored[path] = buf
+	return nil
+}
+
+func testServer(store *fakeStore, tus *fakeTus) *Server {
+	return &Server{
+		store: store,
+		tus:   tus,
+		log:   slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
 }
 
 func newMultipartRequest(t *testing.T, fields map[string]string, fileFirst bool, fileField, filename string, fileBody []byte) *http.Request {
@@ -145,99 +135,132 @@ func newMultipartRequest(t *testing.T, fields map[string]string, fileFirst bool,
 	return req
 }
 
-// liveStack wires a Server to a mock orchestrator (real uploader). Node
-// resolve is bypassed by calling streamUploadToAgent directly with an
-// explicit preference; resolveHomeAgent is tested separately below.
-func liveStack(t *testing.T, cap int64) (*Server, *mockOrchestrator) {
-	t.Helper()
-	mock := &mockOrchestrator{
-		t: t, secret: "svc-secret", cap: cap,
-		agentID: "agent-1", agentURL: "http://agent-1.test",
-		key: "obj_test12345678.zip", ticket: "ticket-abc",
-	}
-	srv := httptest.NewServer(mock.handler())
-	t.Cleanup(srv.Close)
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	return &Server{
-		cfg:  Config{OrchestratorURL: srv.URL},
-		orch: newOrchestratorUploader(srv.URL, "svc-secret", log),
-		log:  log,
-	}, mock
-}
-
-func TestStreamUploadToAgent(t *testing.T) {
+func TestStreamUploadToStaging(t *testing.T) {
 	body := []byte("pretend this is a zip archive" + strings.Repeat("x", 1000))
 	wantSHA := sha256.Sum256(body)
 	fields := map[string]string{
 		"project_id":   "my-app",
 		"project_name": "My App",
+		"run_command":  "npm start",
+		"language":     "node",
+		"env":          `{"A":"1"}`,
+		"manifest":     `{"files":["a.js"],"total_bytes":2,"excluded":[]}`,
 	}
 
 	for _, fileFirst := range []bool{true, false} {
-		srv, mock := liveStack(t, 100<<20)
+		store := &fakeStore{}
+		srv := testServer(store, &fakeTus{})
 		req := newMultipartRequest(t, fields, fileFirst, "file", "archive.zip", body)
-		res, ierr := srv.streamUploadToAgent(req.Context(), req, "http://preferred.test", "UPLOAD_TOO_LARGE")
+		res, ierr := srv.streamUploadToStaging(req.Context(), "project-uploads", req, 400*1024*1024)
 		if ierr != nil {
 			t.Fatalf("fileFirst=%v: unexpected error: %v", fileFirst, ierr)
 		}
 		if res.sha256 != hex.EncodeToString(wantSHA[:]) {
-			t.Errorf("fileFirst=%v: sha mismatch", fileFirst)
+			t.Errorf("fileFirst=%v: sha mismatch: %s", fileFirst, res.sha256)
 		}
 		if res.bytes != int64(len(body)) {
 			t.Errorf("fileFirst=%v: bytes=%d want %d", fileFirst, res.bytes, len(body))
 		}
-		if res.agentID != "agent-1" || res.agentURL != "http://agent-1.test" {
-			t.Errorf("fileFirst=%v: agent not relayed: %+v", fileFirst, res)
-		}
-		if res.agentKey != "obj_test12345678.zip" || res.ticket != "ticket-abc" {
-			t.Errorf("fileFirst=%v: key/ticket not relayed", fileFirst)
-		}
 		if res.filename != "archive.zip" {
 			t.Errorf("fileFirst=%v: filename=%q", fileFirst, res.filename)
+		}
+		if !strings.HasPrefix(res.stagingPath, "staging/") || !strings.HasSuffix(res.stagingPath, ".zip") {
+			t.Errorf("fileFirst=%v: bad staging path %q", fileFirst, res.stagingPath)
 		}
 		for k, v := range fields {
 			if res.fields[k] != v {
 				t.Errorf("fileFirst=%v: field %q=%q want %q", fileFirst, k, res.fields[k], v)
 			}
 		}
-		if !bytes.Equal(mock.received, body) {
-			t.Errorf("fileFirst=%v: orchestrator received %d bytes, want %d intact", fileFirst, len(mock.received), len(body))
+		stored, ok := store.uploaded[res.stagingPath]
+		if !ok {
+			t.Fatalf("fileFirst=%v: nothing stored at %q", fileFirst, res.stagingPath)
 		}
-		if len(mock.preferred) != 1 || mock.preferred[0] != "http://preferred.test" {
-			t.Errorf("fileFirst=%v: preferred header %v", fileFirst, mock.preferred)
+		if !bytes.Equal(stored, body) {
+			t.Errorf("fileFirst=%v: stored bytes differ", fileFirst)
+		}
+		if store.sizes[res.stagingPath] != int64(len(body)) {
+			t.Errorf("fileFirst=%v: declared size %d want %d", fileFirst, store.sizes[res.stagingPath], len(body))
 		}
 	}
 }
 
-func TestStreamUploadTooLarge(t *testing.T) {
-	srv, _ := liveStack(t, 10)
+func TestStreamUploadUsesTusAboveThreshold(t *testing.T) {
+	old := singleShotMaxBytes
+	singleShotMaxBytes = 10
+	defer func() { singleShotMaxBytes = old }()
+
+	body := []byte(strings.Repeat("z", 100))
+	wantSHA := sha256.Sum256(body)
+	store := &fakeStore{}
+	tus := &fakeTus{}
+	srv := testServer(store, tus)
+	req := newMultipartRequest(t, map[string]string{"project_id": "p"}, false, "file", "big.zip", body)
+	res, ierr := srv.streamUploadToStaging(req.Context(), "project-uploads", req, 400*1024*1024)
+	if ierr != nil {
+		t.Fatalf("unexpected error: %v", ierr)
+	}
+	if len(store.uploaded) != 0 {
+		t.Errorf("large body must not use single-shot POST: %v", store.uploaded)
+	}
+	if len(tus.calls) != 1 {
+		t.Fatalf("expected one TUS upload, got %d", len(tus.calls))
+	}
+	call := tus.calls[0]
+	if call.bucket != "project-uploads" || call.size != int64(len(body)) {
+		t.Errorf("wrong TUS call: %+v", call)
+	}
+	if res.stagingPath != call.path {
+		t.Errorf("staging path %q != TUS path %q", res.stagingPath, call.path)
+	}
+	if res.sha256 != hex.EncodeToString(wantSHA[:]) || res.bytes != int64(len(body)) {
+		t.Errorf("wrong hash/size: %+v", res)
+	}
+	if !bytes.Equal(tus.stored[call.path], body) {
+		t.Errorf("TUS-stored bytes differ")
+	}
+}
+
+func TestStreamUploadTusFailure(t *testing.T) {
+	old := singleShotMaxBytes
+	singleShotMaxBytes = 10
+	defer func() { singleShotMaxBytes = old }()
+
+	store := &fakeStore{}
+	tus := &fakeTus{fail: true}
+	srv := testServer(store, tus)
 	req := newMultipartRequest(t, map[string]string{"project_id": "p"}, false, "file", "big.zip", []byte(strings.Repeat("z", 100)))
-	_, ierr := srv.streamUploadToAgent(req.Context(), req, "", "BUNDLE_TOO_LARGE")
+	_, ierr := srv.streamUploadToStaging(req.Context(), "project-uploads", req, 400*1024*1024)
 	if ierr == nil {
-		t.Fatal("expected an error when the store rejects oversize")
-	}
-	if ierr.status != 413 || ierr.code != "BUNDLE_TOO_LARGE" {
-		t.Errorf("got %d/%s want 413/BUNDLE_TOO_LARGE", ierr.status, ierr.code)
-	}
-}
-
-func TestStreamUploadStoreFailure(t *testing.T) {
-	srv, mock := liveStack(t, 100<<20)
-	mock.failStatus = http.StatusBadGateway
-	req := newMultipartRequest(t, map[string]string{"project_id": "p"}, false, "file", "a.zip", []byte("data"))
-	_, ierr := srv.streamUploadToAgent(req.Context(), req, "", "UPLOAD_TOO_LARGE")
-	if ierr == nil {
-		t.Fatal("expected an error when the store fails")
+		t.Fatal("expected an error when TUS fails")
 	}
 	if ierr.status != 502 {
 		t.Errorf("status=%d want 502", ierr.status)
 	}
 }
 
+func TestStreamUploadTooLarge(t *testing.T) {
+	body := []byte(strings.Repeat("y", 100))
+	store := &fakeStore{}
+	srv := testServer(store, &fakeTus{})
+	req := newMultipartRequest(t, map[string]string{"project_id": "p"}, false, "file", "a.zip", body)
+	_, ierr := srv.streamUploadToStaging(req.Context(), "project-uploads", req, 10)
+	if ierr == nil {
+		t.Fatal("expected an error for an oversize body")
+	}
+	if ierr.status != 413 {
+		t.Errorf("status=%d want 413", ierr.status)
+	}
+	// Rejection happens while spooling locally, before any storage call.
+	if len(store.uploaded) != 0 {
+		t.Errorf("oversize body must never reach storage: %v", store.uploaded)
+	}
+}
+
 func TestStreamUploadMissingFile(t *testing.T) {
-	srv, _ := liveStack(t, 100<<20)
+	srv := testServer(&fakeStore{}, &fakeTus{})
 	req := newMultipartRequest(t, map[string]string{"project_id": "p"}, false, "", "", nil)
-	_, ierr := srv.streamUploadToAgent(req.Context(), req, "", "UPLOAD_TOO_LARGE")
+	_, ierr := srv.streamUploadToStaging(req.Context(), "project-uploads", req, 400*1024*1024)
 	if ierr == nil {
 		t.Fatal("expected an error when no file part is present")
 	}
@@ -246,36 +269,26 @@ func TestStreamUploadMissingFile(t *testing.T) {
 	}
 }
 
-func TestResolveHomeAgent(t *testing.T) {
-	node := &mockNodeResolve{agentID: "agent-9", agentURL: "http://agent-9.test"}
-	srv := httptest.NewServer(node.handler())
-	defer srv.Close()
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
-	s := &Server{
-		cfg: Config{UpstreamURL: srv.URL, IngestSecret: "s3cret"},
-		log: log,
+func TestStreamUploadStorageFailure(t *testing.T) {
+	store := &fakeStore{failUpload: true}
+	srv := testServer(store, &fakeTus{})
+	req := newMultipartRequest(t, map[string]string{"project_id": "p"}, false, "file", "a.zip", []byte("data"))
+	_, ierr := srv.streamUploadToStaging(req.Context(), "project-uploads", req, 400*1024*1024)
+	if ierr == nil {
+		t.Fatal("expected an error when storage fails")
 	}
-	// Project resolve forwards the bearer credential.
-	home, ierr := s.resolveHomeAgent(t.Context(), "project", "my-app", "Bearer ox_live_123")
-	if ierr != nil {
-		t.Fatalf("unexpected error: %v", ierr)
+	if ierr.status != 502 {
+		t.Errorf("status=%d want 502", ierr.status)
 	}
-	if home.AgentID != "agent-9" || home.AgentURL != "http://agent-9.test" {
-		t.Errorf("wrong home: %+v", home)
+}
+
+func TestEscapeObjectPath(t *testing.T) {
+	got := escapeObjectPath("staging/stg_ab c+d.zip")
+	// Slashes separate segments and survive; spaces and plus signs do not.
+	if got != "staging/stg_ab%20c+d.zip" && got != "staging/stg_ab%20c%2Bd.zip" {
+		t.Errorf("unexpected escaping: %q", got)
 	}
-	// Bundle resolve forwards the build token.
-	home, ierr = s.resolveHomeAgent(t.Context(), "bundle", "build_1", "token-xyz")
-	if ierr != nil {
-		t.Fatalf("unexpected error: %v", ierr)
-	}
-	if home.AgentID != "agent-9" {
-		t.Errorf("wrong home: %+v", home)
-	}
-	if node.calls != 2 {
-		t.Errorf("calls=%d want 2", node.calls)
-	}
-	// Missing credential fails fast (no anonymous resolve).
-	if _, ierr := s.resolveHomeAgent(t.Context(), "project", "my-app", ""); ierr == nil {
-		t.Error("expected an error without credentials")
+	if strings.Contains(got, " ") {
+		t.Errorf("unescaped space in %q", got)
 	}
 }

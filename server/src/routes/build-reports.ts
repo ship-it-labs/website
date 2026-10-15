@@ -3,7 +3,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { supabase } from "../db/index.js";
 import { updateBuildStatus, getBuild } from "../services/build-service.js";
-import { finalizeBundleUpload } from "../services/upload-finalize.js";
+import { deliverBundle } from "../services/bundle-delivery.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -97,16 +97,14 @@ export function capLogs(
   return kept;
 }
 
-/** Largest bundle the control plane accepts. Runtimes with more footprint
- * than this do not fit the sandbox model anyway (see the 5GB per-runtime
- * watchdog on the agent); the workflow stays under it by excluding caches. */
-const MAX_BUNDLE_BYTES = 300 * 1024 * 1024;
-
 export async function buildReportRoutes(app: FastifyInstance): Promise<void> {
   // Receives a workflow-built runtime bundle: the self-contained app +
   // toolchain the sandbox executes instead of raw source. Authenticated by the
   // same shared token as the report endpoint, since the caller is the same
-  // workflow. Replace semantics: re-uploads overwrite.
+  // workflow. The stream is never buffered: a live runtime's host receives it
+  // directly, otherwise it is drained and the CI artifact stays the only
+  // copy (see bundle-delivery.ts). Text fields must precede the file part —
+  // the stream is consumed in arrival order.
   app.post("/builds/:id/bundle", async (req, reply) => {
     const expected = process.env.BUILD_REPORT_TOKEN ?? "";
     if (!secretMatches(secretFromHeader(req), expected)) {
@@ -123,22 +121,20 @@ export async function buildReportRoutes(app: FastifyInstance): Promise<void> {
         .send({ error: { code: "BUILD_NOT_FOUND", message: "Build not found" } });
     }
 
-    let bundle: Buffer | null = null;
+    let file: AsyncIterable<Uint8Array> | null = null;
+    let githubRepo: string | undefined;
+    let githubRunId: string | undefined;
     try {
       for await (const part of req.parts()) {
-        if (part.type !== "file" || part.fieldname !== "file") continue;
-        const chunks: Buffer[] = [];
-        let size = 0;
-        for await (const chunk of part.file) {
-          size += chunk.length;
-          if (size > MAX_BUNDLE_BYTES) {
-            return reply.status(413).send({
-              error: { code: "BUNDLE_TOO_LARGE", message: "Bundle exceeds the 300MB limit" },
-            });
-          }
-          chunks.push(chunk as Buffer);
+        if (part.type === "file" && part.fieldname === "file" && !file) {
+          file = part.file;
+        } else if (part.type === "field") {
+          if (part.fieldname === "github_repo" && !githubRepo) githubRepo = String(part.value).slice(0, 200);
+          if (part.fieldname === "github_run_id" && !githubRunId) githubRunId = String(part.value).slice(0, 40);
+        } else if (part.type === "file") {
+          // A smuggled second archive under another field name: discard.
+          for await (const _chunk of part.file) { /* drain */ }
         }
-        bundle = Buffer.concat(chunks);
       }
     } catch (err) {
       logger.error({ err, buildId: id }, "Bundle upload parse failed");
@@ -147,18 +143,15 @@ export async function buildReportRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    if (!bundle || bundle.length === 0) {
+    if (!file) {
       return reply.status(400).send({
         error: { code: "VALIDATION_ERROR", message: "file is required" },
       });
     }
 
-    // The storage + artifact tail lives in the shared finalize service so the
-    // edge's internal endpoint records staged bundles identically.
-    const outcome = await finalizeBundleUpload({
-      buildId: id,
-      store: { kind: "buffer", data: bundle },
-    });
+    // The live-or-artifact tail lives in the shared delivery service so the
+    // behavior is identical however the bytes arrive.
+    const outcome = await deliverBundle({ buildId: id, file, githubRepo, githubRunId });
     return reply.status(outcome.status).send(outcome.body);
   });
 
