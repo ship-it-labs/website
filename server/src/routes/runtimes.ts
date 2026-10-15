@@ -6,6 +6,7 @@ import { getQuotaStatus } from "../services/quota-service.js";
 import { callOrchestrator } from "../services/orchestrator-client.js";
 import { latestBundleArtifact } from "../services/build-service.js";
 import { decryptEnvVars, projectEnvKey } from "../utils/env-crypto.js";
+import { isAgentStoreUrl } from "../utils/agent-store.js";
 import { logger } from "../utils/logger.js";
 
 const startSchema = z.object({
@@ -76,7 +77,7 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
     // empty, which left the container with nothing to run.
     const { data: project, error: projectError } = await supabase
       .from("projects")
-      .select("id, run_command, language, env_ciphertext, upload_path, upload_sha256")
+      .select("id, run_command, language, env_ciphertext, upload_path, upload_url, upload_sha256")
       .eq("id", projectId)
       .eq("user_id", userId)
       .single();
@@ -87,22 +88,31 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    // A signed link the agent can actually reach: it pulls from inside the
-    // private network, where the public hostname would not resolve.
-    const { data: signed, error: signError } = await supabase.storage
-      .from("project-uploads")
-      .createSignedUrl(project.upload_path!, SOURCE_URL_TTL_SECONDS, {
-        audience: "internal",
-      });
+    // Agent-stored archives carry their own ticket URL: use it as-is. Supabase
+    // objects get a fresh internal signature the agent can reach.
+    const storedProjectUrl = (project as { upload_url?: string | null }).upload_url ?? null;
+    let sourceUrl: string;
+    if (storedProjectUrl && isAgentStoreUrl(storedProjectUrl)) {
+      sourceUrl = storedProjectUrl;
+    } else {
+      // A signed link the agent can actually reach: it pulls from inside the
+      // private network, where the public hostname would not resolve.
+      const { data: signed, error: signError } = await supabase.storage
+        .from("project-uploads")
+        .createSignedUrl(project.upload_path!, SOURCE_URL_TTL_SECONDS, {
+          audience: "internal",
+        });
 
-    if (signError || !signed?.signedUrl) {
-      logger.error({ err: signError, projectId }, "Could not sign the project archive");
-      return reply.status(500).send({
-        error: {
-          code: "SOURCE_UNAVAILABLE",
-          message: "The project archive could not be prepared for this runtime.",
-        },
-      });
+      if (signError || !signed?.signedUrl) {
+        logger.error({ err: signError, projectId }, "Could not sign the project archive");
+        return reply.status(500).send({
+          error: {
+            code: "SOURCE_UNAVAILABLE",
+            message: "The project archive could not be prepared for this runtime.",
+          },
+        });
+      }
+      sourceUrl = signed.signedUrl;
     }
 
     try {
@@ -133,19 +143,26 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
       // A successful build's bundle runs instead of raw source: it carries the
       // toolchain and dependencies the sandbox host does not have. Missing
       // means no bundle was ever uploaded, and the archive flow applies.
+      // Agent bundle URLs are used as-is (ticket, no signing); Supabase ones
+      // get a fresh signature like the source above.
       let bundleUrl = "";
       let bundleSha256 = "";
       try {
         const bundle = await latestBundleArtifact(userId, projectId);
         if (bundle) {
-          const { data: signedBundle, error: bundleSignError } = await supabase.storage
-            .from("project-uploads")
-            .createSignedUrl(bundle.storage_path, SOURCE_URL_TTL_SECONDS);
-          if (!bundleSignError && signedBundle?.signedUrl) {
-            bundleUrl = signedBundle.signedUrl;
+          if (isAgentStoreUrl(bundle.storage_path)) {
+            bundleUrl = bundle.storage_path;
             bundleSha256 = bundle.sha256;
           } else {
-            logger.warn({ err: bundleSignError, projectId }, "Could not sign bundle URL; using source archive");
+            const { data: signedBundle, error: bundleSignError } = await supabase.storage
+              .from("project-uploads")
+              .createSignedUrl(bundle.storage_path, SOURCE_URL_TTL_SECONDS);
+            if (!bundleSignError && signedBundle?.signedUrl) {
+              bundleUrl = signedBundle.signedUrl;
+              bundleSha256 = bundle.sha256;
+            } else {
+              logger.warn({ err: bundleSignError, projectId }, "Could not sign bundle URL; using source archive");
+            }
           }
         }
       } catch (err) {
@@ -162,7 +179,7 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
         env,
         bundle_url: bundleUrl,
         bundle_sha256: bundleSha256,
-        source_url: signed.signedUrl,
+        source_url: sourceUrl,
         source_sha256: project.upload_sha256 ?? "",
         plan: {
           runtime_hours_per_month: req.auth!.plan.runtime_hours_per_month,

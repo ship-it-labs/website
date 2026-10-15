@@ -1,6 +1,7 @@
 import { supabase, type Database } from "../db/index.js";
 import { callOrchestrator } from "./orchestrator-client.js";
 import { isBuildOverdue } from "./build-service.js";
+import { isAgentStoreUrl } from "../utils/agent-store.js";
 import { logger } from "../utils/logger.js";
 import type { Build } from "../types/index.js";
 
@@ -67,24 +68,38 @@ export async function triggerRuntimeBuild(buildId: string): Promise<void> {
 
   const { data: project, error: projectError } = await supabase
     .from("projects")
-    .select("upload_path, upload_sha256")
+    .select("upload_path, upload_url, upload_sha256")
     .eq("id", build.project_id)
     .single();
 
-  if (projectError || !project?.upload_path) {
+  if (projectError || (!project?.upload_path && !project?.upload_url)) {
     await markFailed(buildId, "The project has no uploaded source to build.");
     throw new Error("Project has no uploaded source");
   }
 
-  // Minted per build and addressed for the private network, because the agent
-  // pulls it from a sibling container rather than from the internet.
-  const { data: signed, error: signError } = await supabase.storage
-    .from("project-uploads")
-    .createSignedUrl(project.upload_path, SOURCE_URL_TTL_SECONDS, { audience: "internal" });
+  // Agent-stored archives already carry a long-lived ticket URL: use it
+  // directly. Supabase objects get a fresh short-lived internal signature
+  // because the agent pulls from a sibling container, not the internet.
+  const storedUrl = project.upload_url as string | null;
+  let sourceUrl: string;
+  if (storedUrl && isAgentStoreUrl(storedUrl)) {
+    sourceUrl = storedUrl;
+  } else {
+    if (!project.upload_path) {
+      await markFailed(buildId, "The project has no uploaded source to build.");
+      throw new Error("Project has no uploaded source");
+    }
+    // Minted per build and addressed for the private network, because the agent
+    // pulls it from a sibling container rather than from the internet.
+    const { data: signed, error: signError } = await supabase.storage
+      .from("project-uploads")
+      .createSignedUrl(project.upload_path, SOURCE_URL_TTL_SECONDS, { audience: "internal" });
 
-  if (signError || !signed?.signedUrl) {
-    await markFailed(buildId, "The project archive could not be prepared for the build.");
-    throw new Error("Could not sign the project archive");
+    if (signError || !signed?.signedUrl) {
+      await markFailed(buildId, "The project archive could not be prepared for the build.");
+      throw new Error("Could not sign the project archive");
+    }
+    sourceUrl = signed.signedUrl;
   }
 
   await supabase
@@ -94,7 +109,7 @@ export async function triggerRuntimeBuild(buildId: string): Promise<void> {
 
   await callOrchestrator("/build/start", {
     build_id: buildId,
-    source_url: signed.signedUrl,
+    source_url: sourceUrl,
     source_sha256: project.upload_sha256 ?? "",
     install_commands: toCommandList(build.install_commands),
     build_commands: toCommandList(build.build_commands),
