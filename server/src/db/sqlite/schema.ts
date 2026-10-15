@@ -190,6 +190,8 @@ create table if not exists projects (
   file_count integer not null default 0,
   language text,
   env_ciphertext text,
+  agent_id text,
+  agent_url text,
   created_at text not null default (datetime('now')),
   updated_at text not null default (datetime('now'))
 );

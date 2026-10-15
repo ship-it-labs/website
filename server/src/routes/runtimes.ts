@@ -7,6 +7,7 @@ import { callOrchestrator } from "../services/orchestrator-client.js";
 import { latestBundleArtifact } from "../services/build-service.js";
 import { decryptEnvVars, projectEnvKey } from "../utils/env-crypto.js";
 import { isAgentStoreUrl } from "../utils/agent-store.js";
+import { projectStoreAgentColumns } from "../services/upload-finalize.js";
 import { logger } from "../utils/logger.js";
 
 const startSchema = z.object({
@@ -91,6 +92,14 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
     // Agent-stored archives carry their own ticket URL: use it as-is. Supabase
     // objects get a fresh internal signature the agent can reach.
     const storedProjectUrl = (project as { upload_url?: string | null }).upload_url ?? null;
+
+    // Home-agent affinity: when this project's files live on one host's disk,
+    // the start pins to that host so archives read locally. Missing columns
+    // (pre-0027), legacy rows and Supabase-backed projects all resolve to no
+    // preference, which keeps least-loaded routing — never a failed start.
+    const homeAgent = await projectStoreAgentColumns(projectId, userId);
+    const preferredAgentUrl = homeAgent?.agent_url ?? "";
+    const preferredAgentId = homeAgent?.agent_id ?? "";
     let sourceUrl: string;
     if (storedProjectUrl && isAgentStoreUrl(storedProjectUrl)) {
       sourceUrl = storedProjectUrl;
@@ -181,6 +190,12 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
         bundle_sha256: bundleSha256,
         source_url: sourceUrl,
         source_sha256: project.upload_sha256 ?? "",
+        ...(preferredAgentUrl
+          ? {
+              preferred_agent_url: preferredAgentUrl,
+              ...(preferredAgentId ? { preferred_agent_id: preferredAgentId } : {}),
+            }
+          : {}),
         plan: {
           runtime_hours_per_month: req.auth!.plan.runtime_hours_per_month,
           max_runtime_hours: req.auth!.plan.max_runtime_hours,

@@ -3,7 +3,7 @@ import { supabase } from "../db/index.js";
 import { logger } from "../utils/logger.js";
 import { resolveLanguage } from "./languages.js";
 import { resolveProjectId } from "./project-identity.js";
-import { recordBundleArtifact } from "./build-service.js";
+import { recordBundleArtifact, getBuild } from "./build-service.js";
 import {
   parseEnvVars,
   encryptEnvVars,
@@ -38,6 +38,7 @@ export type UploadStore =
   // query, sha verified on arrival), on this host or a sibling.
   | {
       kind: "agent";
+      agentId: string;
       agentUrl: string;
       key: string;
       sha256: string;
@@ -65,6 +66,44 @@ export interface BundleFinalizeInput {
 export interface FinalizeOutcome {
   status: number;
   body: unknown;
+}
+
+/** True when a write failed only because migration columns don't exist yet
+ * (PGRST204 on PostgREST, no-such-column on sqlite). Callers degrade instead
+ * of failing the upload over bookkeeping. */
+function isMissingColumnError(error: unknown): boolean {
+  const msg = String((error as { message?: string } | null)?.message ?? error ?? "");
+  return /PGRST204|schema cache|no such column/i.test(msg);
+}
+
+/** Tolerant read of one project's home-agent columns. Null when unset,
+ * missing (pre-0027), or unreadable — all meaning "no affinity recorded".
+ * Scoped to the caller's account when a userId is given. */
+export async function projectStoreAgentColumns(
+  projectId: string,
+  userId?: string
+): Promise<{ agent_id: string | null; agent_url: string | null } | null> {
+  try {
+    let query = supabase
+      .from("projects")
+      .select("agent_id, agent_url")
+      .eq("id", projectId);
+    if (userId) query = query.eq("user_id", userId);
+    const { data, error } = await query.limit(1);
+    if (error) {
+      if (isMissingColumnError(error)) return null;
+      throw error;
+    }
+    const row = (((data ?? []) as unknown[]) as {
+      agent_id?: string | null;
+      agent_url?: string | null;
+    }[])[0];
+    if (!row) return null;
+    return { agent_id: row.agent_id ?? null, agent_url: row.agent_url ?? null };
+  } catch (err) {
+    logger.debug({ err, projectId }, "Home-agent read skipped");
+    return null;
+  }
 }
 
 async function placeObject(
@@ -225,24 +264,60 @@ export async function finalizeProjectUpload(input: ProjectFinalizeInput): Promis
     }
   }
 
-  const { error: projectError } = await supabase.from("projects").upsert(
-    {
-      id: resolvedId,
-      user_id: userId,
-      name: input.projectName || resolvedId,
-      run_command: input.runCommand,
-      language: resolved.language,
-      env_ciphertext: envCiphertext,
+  // Agent home is recorded so re-uploads land on the same host and runtime
+  // starts pin back to it. An upsert carrying unknown columns fails the whole
+  // write (PGRST204 / no-such-column when migration 0027 hasn't run), so on
+  // exactly that error the write retries without the agent columns: the
+  // upload itself must never 500 over bookkeeping.
+  const agentCols =
+    input.store.kind === "agent"
+      ? { agent_id: input.store.agentId || null, agent_url: input.store.agentUrl || null }
+      : {};
+  let projectError: unknown;
+  {
+    const attempt = await supabase.from("projects").upsert(
+      {
+        id: resolvedId,
+        user_id: userId,
+        name: input.projectName || resolvedId,
+        run_command: input.runCommand,
+        language: resolved.language,
+        env_ciphertext: envCiphertext,
         upload_id: uploadId,
         upload_path: storagePath,
         upload_url: signedUrl,
-      upload_sha256: sha256,
-      upload_bytes: bytes,
-      file_count: input.manifest?.files?.length ?? 0,
-      updated_at: now,
-    },
-    { onConflict: "id" }
-  );
+        upload_sha256: sha256,
+        upload_bytes: bytes,
+        file_count: input.manifest?.files?.length ?? 0,
+        updated_at: now,
+        ...agentCols,
+      },
+      { onConflict: "id" }
+    );
+    projectError = attempt.error;
+    if (projectError && isMissingColumnError(projectError) && Object.keys(agentCols).length > 0) {
+      logger.warn({ ...logCtx }, "Agent columns missing; recording upload without affinity");
+      const retry = await supabase.from("projects").upsert(
+        {
+          id: resolvedId,
+          user_id: userId,
+          name: input.projectName || resolvedId,
+          run_command: input.runCommand,
+          language: resolved.language,
+          env_ciphertext: envCiphertext,
+          upload_id: uploadId,
+          upload_path: storagePath,
+          upload_url: signedUrl,
+          upload_sha256: sha256,
+          upload_bytes: bytes,
+          file_count: input.manifest?.files?.length ?? 0,
+          updated_at: now,
+        },
+        { onConflict: "id" }
+      );
+      projectError = retry.error;
+    }
+  }
 
   if (projectError) {
     logger.error({ err: projectError, ...logCtx }, "Project record upsert failed");
@@ -317,6 +392,31 @@ export async function finalizeBundleUpload(input: BundleFinalizeInput): Promise<
       status: 500,
       body: { error: { code: "INTERNAL_ERROR", message: "Failed to record the bundle" } },
     };
+  }
+
+  // Align the project with the bundle's home host when it has none yet, so
+  // the next runtime start pins to where both artifacts live. Best-effort and
+  // missing-column tolerant; a legacy project keeps working without affinity.
+  // Read-then-write (not an `is null` filter) because the local sqlite
+  // stand-in has no `.is()`; an indexed point read is cheap either way.
+  if (isAgent) {
+    try {
+      const agent = input.store as { agentId: string; agentUrl: string };
+      const build = await getBuild(buildId);
+      const projectId = (build as { project_id?: string } | null)?.project_id;
+      if (projectId && agent.agentUrl) {
+        const current = await projectStoreAgentColumns(projectId);
+        if (current && !current.agent_id && !current.agent_url) {
+          const { error } = await supabase
+            .from("projects")
+            .update({ agent_id: agent.agentId || null, agent_url: agent.agentUrl })
+            .eq("id", projectId);
+          if (error && !isMissingColumnError(error)) throw error;
+        }
+      }
+    } catch (err) {
+      logger.warn({ err, buildId }, "Bundle home alignment skipped");
+    }
   }
 
   logger.info({ buildId, bytes, sha256 }, "Recorded runtime bundle");

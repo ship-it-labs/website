@@ -35,10 +35,11 @@ func writeIngestError(w http.ResponseWriter, e *ingestError) {
 }
 
 // uploadResult carries everything Node needs to finalize without ever seeing
-// the bytes: where the agent stored them, their hash and size, the fetch
-// ticket, and the small text fields that rode along in the same multipart
-// body.
+// the bytes: where they landed, their hash and size, the fetch ticket, and
+// the small text fields that rode along in the same multipart body.
 type uploadResult struct {
+	agentID  string
+	agentURL string
 	agentKey string
 	ticket   string
 	sha256   string
@@ -48,13 +49,15 @@ type uploadResult struct {
 }
 
 // streamUploadToAgent reads a multipart body part by part, piping the single
-// `file` part straight through to the server-agent's object store and
-// collecting the small text fields. No spool, no buffer, no size-up-front:
-// the part reader is the PUT body, RAM stays flat, and the 20GB cap is
-// enforced authoritatively by the agent (which answers 413 past it).
+// `file` part straight through to the orchestrator (which forwards it to the
+// preferred home host, or a random healthy one) and collecting the small text
+// fields. No spool, no buffer, no size-up-front: the part reader is the PUT
+// body, RAM stays flat, and the 20GB cap is enforced authoritatively by the
+// storing agent (which answers 413 past it, relayed here).
 func (s *Server) streamUploadToAgent(
 	ctx context.Context,
 	r *http.Request,
+	preferredAgentURL string,
 	tooLargeCode string,
 ) (*uploadResult, *ingestError) {
 	mr, err := r.MultipartReader()
@@ -95,20 +98,25 @@ func (s *Server) streamUploadToAgent(
 			res.filename = fn
 		}
 
-		stored, agentStatus, err := s.agent.Put(ctx, part, "application/zip")
+		stored, storeStatus, err := s.orch.Put(ctx, part, preferredAgentURL)
 		if err != nil {
-			if agentStatus == http.StatusRequestEntityTooLarge {
+			if storeStatus == http.StatusRequestEntityTooLarge {
 				return nil, &ingestError{
 					status:  413,
 					code:    tooLargeCode,
 					message: "Upload exceeds the 20GB limit",
 				}
 			}
+			if storeStatus == http.StatusServiceUnavailable {
+				return nil, &ingestError{status: 503, code: "NO_AGENTS", message: "No storage hosts are currently reachable"}
+			}
 			return nil, &ingestError{status: 502, code: "STORAGE_UNAVAILABLE", message: "Failed to store the upload"}
 		}
 		if stored.Bytes == 0 {
 			return nil, &ingestError{status: 400, code: "VALIDATION_ERROR", message: "file is required"}
 		}
+		res.agentID = stored.AgentID
+		res.agentURL = stored.AgentURL
 		res.agentKey = stored.Key
 		res.ticket = stored.Ticket
 		res.sha256 = stored.SHA256

@@ -11,7 +11,7 @@ import (
 // through to Node.
 type Server struct {
 	cfg   Config
-	agent agentStorer
+	orch  *orchestratorUploader
 	proxy http.Handler
 	log   *slog.Logger
 }
@@ -19,7 +19,7 @@ type Server struct {
 func NewServer(cfg Config, log *slog.Logger) *Server {
 	return &Server{
 		cfg:   cfg,
-		agent: newAgentUploader(cfg.AgentStoreURL, cfg.AgentSecret, log),
+		orch:  newOrchestratorUploader(cfg.OrchestratorURL, cfg.OrchestratorSecret, log),
 		proxy: newProxy(cfg.UpstreamURL),
 		log:   log,
 	}
@@ -49,15 +49,23 @@ func (s *Server) notReady() *ingestError {
 	}
 }
 
-// handleProjectUpload pipes the project archive to the server-agent's object
-// store, then asks Node to finalize (identity, language, env crypto, database
-// record) and relays Node's response verbatim.
+// handleProjectUpload resolves the project's home host, pipes the archive
+// through the orchestrator to it, asks Node to finalize, and relays Node's
+// response verbatim. The project id rides the query string (the plugin sends
+// it there as well as in the body) so resolution happens before a single
+// body byte is read, regardless of multipart part order.
 func (s *Server) handleProjectUpload(w http.ResponseWriter, r *http.Request) {
 	if err := s.notReady(); err != nil {
 		writeIngestError(w, err)
 		return
 	}
-	res, ierr := s.streamUploadToAgent(r.Context(), r, "UPLOAD_TOO_LARGE")
+	projectID := r.URL.Query().Get("project_id")
+	home, ierr := s.resolveHomeAgent(r.Context(), "project", projectID, r.Header.Get("Authorization"))
+	if ierr != nil {
+		writeIngestError(w, ierr)
+		return
+	}
+	res, ierr := s.streamUploadToAgent(r.Context(), r, home.AgentURL, "UPLOAD_TOO_LARGE")
 	if ierr != nil {
 		s.log.Error("project ingest failed",
 			"status", ierr.status, "code", ierr.code, "message", ierr.message)
@@ -66,7 +74,8 @@ func (s *Server) handleProjectUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	status, body, err := callFinalize(r.Context(), s.cfg.UpstreamURL, s.cfg.IngestSecret, "/internal/ingest/project", map[string]any{
 		"authorization": r.Header.Get("Authorization"),
-		"agent_url":     s.cfg.AgentStoreURL,
+		"agent_id":      res.agentID,
+		"agent_url":     res.agentURL,
 		"agent_key":     res.agentKey,
 		"ticket":        res.ticket,
 		"sha256":        res.sha256,
@@ -93,6 +102,7 @@ func (s *Server) handleProjectUpload(w http.ResponseWriter, r *http.Request) {
 
 // handleBundleUpload does the same for CI-built runtime bundles, which
 // authenticate with the shared build-report token rather than a user key.
+// The build id is in the URL path, so resolution needs no body peeking.
 func (s *Server) handleBundleUpload(w http.ResponseWriter, r *http.Request) {
 	if err := s.notReady(); err != nil {
 		writeIngestError(w, err)
@@ -103,7 +113,12 @@ func (s *Server) handleBundleUpload(w http.ResponseWriter, r *http.Request) {
 		writeIngestError(w, &ingestError{status: 400, code: "VALIDATION_ERROR", message: "build id is required"})
 		return
 	}
-	res, ierr := s.streamUploadToAgent(r.Context(), r, "BUNDLE_TOO_LARGE")
+	home, ierr := s.resolveHomeAgent(r.Context(), "bundle", id, r.Header.Get("X-Build-Report-Token"))
+	if ierr != nil {
+		writeIngestError(w, ierr)
+		return
+	}
+	res, ierr := s.streamUploadToAgent(r.Context(), r, home.AgentURL, "BUNDLE_TOO_LARGE")
 	if ierr != nil {
 		s.log.Error("bundle ingest failed",
 			"build_id", id, "status", ierr.status, "code", ierr.code, "message", ierr.message)
@@ -113,7 +128,8 @@ func (s *Server) handleBundleUpload(w http.ResponseWriter, r *http.Request) {
 	status, body, err := callFinalize(r.Context(), s.cfg.UpstreamURL, s.cfg.IngestSecret, "/internal/ingest/bundle", map[string]any{
 		"build_token": r.Header.Get("X-Build-Report-Token"),
 		"build_id":    id,
-		"agent_url":   s.cfg.AgentStoreURL,
+		"agent_id":    res.agentID,
+		"agent_url":   res.agentURL,
 		"agent_key":   res.agentKey,
 		"ticket":      res.ticket,
 		"sha256":      res.sha256,

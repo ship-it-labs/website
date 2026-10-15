@@ -83,6 +83,8 @@ create table if not exists public.projects (
   upload_sha256 text,
   upload_bytes bigint not null default 0,
   file_count integer not null default 0,
+  agent_id text,
+  agent_url text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );

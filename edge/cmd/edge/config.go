@@ -24,13 +24,13 @@ type Config struct {
 	NodeMaxOldSpace string
 	// IngestSecret authenticates the container-internal finalize calls.
 	IngestSecret string
-	// AgentStoreURL/AgentSecret point at the server-agent that persists
-	// uploaded bytes on its own filesystem. Bytes never touch object storage:
-	// the edge pipes them straight through, and Node records only the key,
-	// hash and fetch ticket the agent returns. The 20GB size cap lives on the
-	// agent, which answers 413 past it.
-	AgentStoreURL string
-	AgentSecret   string
+	// OrchestratorURL/OrchestratorSecret point at the server-orchestrator,
+	// which picks the storing agent (random healthy, or the project's home)
+	// and pipes bytes through to it. The edge holds no agent addresses and no
+	// agent secret — same service secret the control plane already uses. The
+	// 20GB size cap lives on the storing agent, which answers 413 past it.
+	OrchestratorURL    string
+	OrchestratorSecret string
 }
 
 func envOr(key, def string) string {
@@ -58,9 +58,9 @@ func loadConfig() Config {
 		NodeEntry:       envOr("NODE_ENTRY", "dist/index.js"),
 		NodeArgs:        splitArgs(os.Getenv("NODE_ARGS")),
 		NodeMaxOldSpace: envOr("NODE_MAX_OLD_SPACE_MB", "384"),
-		IngestSecret:    os.Getenv("INTERNAL_INGEST_SECRET"),
-		AgentStoreURL:   os.Getenv("AGENT_STORE_URL"),
-		AgentSecret:     os.Getenv("AGENT_SECRET"),
+		IngestSecret:       os.Getenv("INTERNAL_INGEST_SECRET"),
+		OrchestratorURL:    os.Getenv("ORCHESTRATOR_URL"),
+		OrchestratorSecret: os.Getenv("ORCHESTRATOR_SECRET"),
 	}
 }
 
@@ -68,5 +68,5 @@ func loadConfig() Config {
 // missing piece must read as a loud 503 at request time (and a boot warning),
 // never as bytes accepted with nowhere to put them.
 func (c Config) ingestReady() bool {
-	return c.IngestSecret != "" && c.AgentStoreURL != "" && c.AgentSecret != ""
+	return c.IngestSecret != "" && c.OrchestratorURL != "" && c.OrchestratorSecret != ""
 }
