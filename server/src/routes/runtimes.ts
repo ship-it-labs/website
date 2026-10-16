@@ -7,6 +7,7 @@ import { callOrchestrator } from "../services/orchestrator-client.js";
 import { latestBundleArtifact } from "../services/build-service.js";
 import { decryptEnvVars, projectEnvKey } from "../utils/env-crypto.js";
 import { isAgentStoreUrl } from "../utils/agent-store.js";
+import { isGithubArtifactUrl } from "../services/bundle-delivery.js";
 import { projectStoreAgentColumns, touchProjectActivity } from "../services/upload-finalize.js";
 import { logger } from "../utils/logger.js";
 
@@ -163,8 +164,10 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
       // A successful build's bundle runs instead of raw source: it carries the
       // toolchain and dependencies the sandbox host does not have. Missing
       // means no bundle was ever uploaded, and the archive flow applies.
-      // Agent bundle URLs are used as-is (ticket, no signing); Supabase ones
-      // get a fresh signature like the source above.
+      // Agent bundle URLs are used as-is (ticket, no signing); CI-artifact
+      // markers (no live runtime at build time) are skipped quietly — the
+      // only copy lives on GitHub, so source runs; Supabase ones get a fresh
+      // signature like the source above.
       let bundleUrl = "";
       let bundleSha256 = "";
       try {
@@ -173,6 +176,8 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
           if (isAgentStoreUrl(bundle.storage_path)) {
             bundleUrl = bundle.storage_path;
             bundleSha256 = bundle.sha256;
+          } else if (isGithubArtifactUrl(bundle.storage_path)) {
+            logger.info({ projectId }, "Newest bundle lives only in CI artifacts; using source archive");
           } else {
             const { data: signedBundle, error: bundleSignError } = await supabase.storage
               .from("project-uploads")

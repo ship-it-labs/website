@@ -31,6 +31,19 @@ import {
  * watchdog on the agent); the workflow stays under it by excluding caches. */
 export const MAX_BUNDLE_BYTES = 300 * 1024 * 1024;
 
+/**
+ * True when a bundle artifact row points at the CI artifact rather than any
+ * fetchable object store. Starters must skip these without attempting a
+ * Supabase signature (which fails noisily with a 404 that looks like a
+ * storage fault but is just a marker): the source archive runs instead.
+ */
+export function isGithubArtifactUrl(url: string | null | undefined): boolean {
+  return (
+    typeof url === "string" &&
+    (url.startsWith("https://github.com/") || url.startsWith("github-artifacts:"))
+  );
+}
+
 interface LiveTarget {
   agentId: string;
   agentUrl: string;
