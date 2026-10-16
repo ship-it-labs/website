@@ -4,6 +4,7 @@ import { z } from "zod";
 import { supabase } from "../db/index.js";
 import { updateBuildStatus, getBuild } from "../services/build-service.js";
 import { deliverBundle } from "../services/bundle-delivery.js";
+import type { FinalizeOutcome } from "../services/upload-finalize.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -103,8 +104,11 @@ export async function buildReportRoutes(app: FastifyInstance): Promise<void> {
   // same shared token as the report endpoint, since the caller is the same
   // workflow. The stream is never buffered: a live runtime's host receives it
   // directly, otherwise it is drained and the CI artifact stays the only
-  // copy (see bundle-delivery.ts). Text fields must precede the file part —
-  // the stream is consumed in arrival order.
+  // copy (see bundle-delivery.ts). The file part is consumed INSIDE the parts
+  // loop (delivery starts the moment it arrives): stashing the stream and
+  // consuming it after the loop hangs forever, because busboy only finishes
+  // the multipart body while the file flows. Text fields must precede the
+  // file part — the stream is consumed in arrival order.
   app.post("/builds/:id/bundle", async (req, reply) => {
     const expected = process.env.BUILD_REPORT_TOKEN ?? "";
     if (!secretMatches(secretFromHeader(req), expected)) {
@@ -121,13 +125,13 @@ export async function buildReportRoutes(app: FastifyInstance): Promise<void> {
         .send({ error: { code: "BUILD_NOT_FOUND", message: "Build not found" } });
     }
 
-    let file: AsyncIterable<Uint8Array> | null = null;
+    let delivery: Promise<FinalizeOutcome> | null = null;
     let githubRepo: string | undefined;
     let githubRunId: string | undefined;
     try {
       for await (const part of req.parts()) {
-        if (part.type === "file" && part.fieldname === "file" && !file) {
-          file = part.file;
+        if (part.type === "file" && part.fieldname === "file" && !delivery) {
+          delivery = deliverBundle({ buildId: id, file: part.file, githubRepo, githubRunId });
         } else if (part.type === "field") {
           if (part.fieldname === "github_repo" && !githubRepo) githubRepo = String(part.value).slice(0, 200);
           if (part.fieldname === "github_run_id" && !githubRunId) githubRunId = String(part.value).slice(0, 40);
@@ -138,21 +142,38 @@ export async function buildReportRoutes(app: FastifyInstance): Promise<void> {
       }
     } catch (err) {
       logger.error({ err, buildId: id }, "Bundle upload parse failed");
-      return reply.status(400).send({
-        error: { code: "INVALID_UPLOAD", message: "Could not read the bundle upload" },
-      });
+      if (!delivery) {
+        return reply.status(400).send({
+          error: { code: "INVALID_UPLOAD", message: "Could not read the bundle upload" },
+        });
+      }
+      // The file was already streaming into delivery when the body broke;
+      // fall through and report delivery's outcome instead of sending twice.
     }
 
-    if (!file) {
+    if (!delivery) {
       return reply.status(400).send({
         error: { code: "VALIDATION_ERROR", message: "file is required" },
       });
     }
 
     // The live-or-artifact tail lives in the shared delivery service so the
-    // behavior is identical however the bytes arrive.
-    const outcome = await deliverBundle({ buildId: id, file, githubRepo, githubRunId });
-    return reply.status(outcome.status).send(outcome.body);
+    // behavior is identical however the bytes arrive. The sent-guard is the
+    // backstop against double replies on aborted connections: a second send
+    // crashes the process (ERR_HTTP_HEADERS_SENT) and takes every in-flight
+    // request down with it.
+    try {
+      const outcome = await delivery;
+      return reply.status(outcome.status).send(outcome.body);
+    } catch (err) {
+      logger.warn({ err, buildId: id }, "Bundle delivery failed after parse");
+      if (!reply.sent) {
+        return reply.status(502).send({
+          error: { code: "STORE_FAILED", message: "Bundle delivery failed" },
+        });
+      }
+      return;
+    }
   });
 
   app.post("/builds/:id/report", async (req, reply) => {
