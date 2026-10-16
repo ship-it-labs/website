@@ -1,4 +1,4 @@
-import { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { authenticateApiKey } from "../middleware/auth.js";
 import { supabase } from "../db/index.js";
@@ -62,6 +62,25 @@ const WITH_SINGLE_502_RETRY = { retryUnavailableOnce: true } as const;
 export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authenticateApiKey);
 
+  // The auth hook sets req.auth on every path that reaches a handler, but a
+  // missing auth must read as a 401 here, never as a TypeError deeper in the
+  // route: an unhandled throw after a reply was already sent crashes the
+  // response with ERR_HTTP_HEADERS_SENT and poisons the request.
+  function requireUserId(
+    req: FastifyRequest,
+    reply: FastifyReply
+  ): string | null {
+    const userId = req.auth?.userId;
+    if (!userId) {
+      logger.error("Runtime route reached handler without auth");
+      reply.status(401).send({
+        error: { code: "UNAUTHORIZED", message: "Missing credentials" },
+      });
+      return null;
+    }
+    return userId;
+  }
+
   app.post("/runtimes", async (req, reply) => {
     const parsed = startSchema.safeParse(req.body);
     if (!parsed.success) {
@@ -70,7 +89,8 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
-    const userId = req.auth!.userId;
+    const userId = requireUserId(req, reply);
+    if (!userId) return;
     const projectId = parsed.data.project_id;
 
     // The project lives in this process's own store, so the start command and
@@ -257,14 +277,17 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/runtimes", async (req, reply) => {
+    const listUserId = requireUserId(req, reply);
+    if (!listUserId) return;
     try {
       const result = await callOrchestrator<{ runtimes: { project_id?: string }[] }>("/runtime/list", {
-        user_id: req.auth!.userId,
+        user_id: listUserId,
       });
       // Resolve project names for the rows; the list still succeeds if the
       // lookup fails, just without names.
-      const projects = await projectNamesFor(req.auth!.userId);
-      return reply.send({ runtimes: attachProjectNames(result.runtimes ?? [], projects) });
+      const projects = await projectNamesFor(listUserId);
+      const rows = Array.isArray(result?.runtimes) ? result.runtimes : [];
+      return reply.send({ runtimes: attachProjectNames(rows, projects) });
     } catch (err) {
       logger.error({ err }, "Orchestrator list failed");
       return reply.status(502).send({
@@ -277,7 +300,8 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
   // user_id, so one account can never stop another's runtimes. Per-runtime
   // failures are reported, not thrown: a partial stop is still useful.
   app.post("/runtimes/stop-all", async (req, reply) => {
-    const userId = req.auth!.userId;
+    const userId = requireUserId(req, reply);
+    if (!userId) return;
     let ids: string[];
     try {
       const listed = await callOrchestrator<{ runtimes: { runtime_id?: string; id?: string }[] }>(

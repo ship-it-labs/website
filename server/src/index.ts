@@ -331,6 +331,11 @@ try {
       env: process.env.NODE_ENV,
       publicUrl: publicBaseUrl(),
       siteUrl: siteUrl(),
+      // Render injects RENDER_GIT_COMMIT; anything else (local, docker)
+      // falls back to a build-time GIT_SHA. "Which code is live" must never
+      // be a guessing game during an outage again.
+      commit:
+        process.env.RENDER_GIT_COMMIT ?? process.env.GIT_SHA ?? "unknown",
     },
     "Control plane started"
   );
