@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -10,7 +11,7 @@ import (
 // Node control plane unchanged: same paths, same headers, same bodies,
 // including websocket upgrades (ReverseProxy has passed Upgrade through since
 // Go 1.12). Nothing the plugin, dashboard or CI calls today changes shape.
-func newProxy(upstream string) *httputil.ReverseProxy {
+func newProxy(upstream string, log *slog.Logger) *httputil.ReverseProxy {
 	target, err := url.Parse(upstream)
 	if err != nil {
 		// A bad UPSTREAM_URL is a boot-time misconfiguration; crash loudly
@@ -30,7 +31,11 @@ func newProxy(upstream string) *httputil.ReverseProxy {
 	}
 	p.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
 		// Node is still booting, or died. 502 with a retryable message, not a
-		// stack trace: CI already retries these.
+		// stack trace: CI already retries these. Logged server-side because a
+		// proxy failure otherwise leaves no trace anywhere (Node never saw
+		// the request, so its logs stay silent and callers only see 502).
+		log.Error("proxy upstream unavailable",
+			"method", r.Method, "path", r.URL.Path, "error", err)
 		writeIngestError(w, &ingestError{
 			status:  502,
 			code:    "UPSTREAM_UNAVAILABLE",

@@ -24,7 +24,7 @@ func NewServer(cfg Config, log *slog.Logger) *Server {
 		cfg:   cfg,
 		store: NewStorage(cfg.SupabaseURL, cfg.SupabaseKey, log),
 		tus:   newTusClient(cfg.SupabaseURL, cfg.SupabaseKey, log),
-		proxy: newProxy(cfg.UpstreamURL),
+		proxy: newProxy(cfg.UpstreamURL, log),
 		log:   log,
 	}
 }
