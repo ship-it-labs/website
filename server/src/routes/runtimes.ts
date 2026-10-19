@@ -197,7 +197,10 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
             bundleUrl = bundle.storage_path;
             bundleSha256 = bundle.sha256;
           } else if (isGithubArtifactUrl(bundle.storage_path)) {
-            logger.info({ projectId }, "Newest bundle lives only in CI artifacts; using source archive");
+            logger.warn(
+              { projectId, bundlePath: bundle.storage_path },
+              "Newest bundle lives only in CI artifacts; using source archive (rebuild to store it)"
+            );
           } else {
             const { data: signedBundle, error: bundleSignError } = await supabase.storage
               .from("project-uploads")
@@ -205,10 +208,19 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
             if (!bundleSignError && signedBundle?.signedUrl) {
               bundleUrl = signedBundle.signedUrl;
               bundleSha256 = bundle.sha256;
+              logger.info({ projectId, bundlePath: bundle.storage_path }, "Using stored CI bundle");
             } else {
-              logger.warn({ err: bundleSignError, projectId }, "Could not sign bundle URL; using source archive");
+              logger.warn(
+                { err: bundleSignError, projectId, bundlePath: bundle.storage_path },
+                "Could not sign bundle URL; using source archive"
+              );
             }
           }
+        } else {
+          logger.warn(
+            { projectId, language: row.language ?? "node" },
+            "No bundle artifact recorded for any successful build; using source archive"
+          );
         }
       } catch (err) {
         // Best-effort: a bundle lookup failure must not block starting from
