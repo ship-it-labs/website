@@ -60,6 +60,54 @@ export async function copyStagedObject(
   }
 }
 
+/** Streams an upload straight into object storage without buffering it in
+ * Node's heap. Upserts: bundles reuse one key per build id so a re-delivery
+ * replaces the object instead of piling up copies. */
+export async function uploadObjectStream(
+  bucket: string,
+  key: string,
+  body: ReadableStream<Uint8Array>,
+  contentType: string
+): Promise<void> {
+  if (usingSqlite) {
+    const root = process.env.LOCAL_STORAGE_ROOT || "./.data/storage";
+    const dst = path.join(root, bucket, key);
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    const out = fs.createWriteStream(dst);
+    for await (const chunk of body as unknown as AsyncIterable<Uint8Array>) {
+      if (!out.write(chunk)) {
+        await new Promise<void>((resolve) => out.once("drain", resolve));
+      }
+    }
+    await new Promise<void>((resolve, reject) =>
+      out.end((err: Error | null | undefined) => (err ? reject(err) : resolve()))
+    );
+    return;
+  }
+  const res = await fetch(
+    `${restBase()}/object/${encodeURIComponent(bucket)}/${key
+      .split("/")
+      .map(encodeURIComponent)
+      .join("/")}`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${serviceKey()}`,
+        apikey: serviceKey(),
+        "Content-Type": contentType,
+        "x-upsert": "true",
+      },
+      body,
+      duplex: "half",
+      signal: AbortSignal.timeout(10 * 60 * 1000),
+    }
+  );
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`storage upload failed (${res.status}): ${text.slice(0, 200)}`);
+  }
+}
+
 /** Best-effort removal of staging objects (abandoned uploads, post-copy cleanup). */
 export async function deleteStagedObjects(bucket: string, keys: string[]): Promise<void> {
   if (keys.length === 0) return;
