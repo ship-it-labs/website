@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { authenticateApiKey } from "../middleware/auth.js";
+import { publicBaseUrl } from "../config/urls.js";
 import { supabase } from "../db/index.js";
 import { getQuotaStatus } from "../services/quota-service.js";
 import { callOrchestrator } from "../services/orchestrator-client.js";
@@ -197,10 +198,14 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
             bundleUrl = bundle.storage_path;
             bundleSha256 = bundle.sha256;
           } else if (isGithubArtifactUrl(bundle.storage_path)) {
-            logger.warn(
-              { projectId, bundlePath: bundle.storage_path },
-              "Newest bundle lives only in CI artifacts; using source archive (rebuild to store it)"
-            );
+            // The bundle was never stored anywhere: it lives only as the
+            // GitHub Actions artifact, which the sandbox host cannot fetch
+            // itself (no GitHub token). Stream it straight to the agent
+            // through the build bundle proxy instead of falling back to a
+            // source archive that has no interpreter or dependencies.
+            bundleUrl = `${publicBaseUrl()}/api/v1/builds/${bundle.build_id}/bundle`;
+            bundleSha256 = bundle.sha256;
+            logger.info({ projectId, bundlePath: bundle.storage_path }, "Streaming CI bundle to agent via proxy");
           } else {
             const { data: signedBundle, error: bundleSignError } = await supabase.storage
               .from("project-uploads")

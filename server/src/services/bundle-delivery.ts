@@ -4,28 +4,24 @@ import { orchestratorSecret, orchestratorUrl } from "../config/urls.js";
 import { getBuild, recordBundleArtifact } from "./build-service.js";
 import { callOrchestrator } from "./orchestrator-client.js";
 import {
-  BUNDLE_BUCKET,
   finalizeBundleUpload,
   touchProjectActivity,
   type FinalizeOutcome,
 } from "./upload-finalize.js";
-import { uploadObjectStream } from "./object-store.js";
 
 /**
- * Live-or-stored bundle delivery.
+ * Live-or-artifact bundle delivery.
  *
- * CI-built bundles never buffer in Node's heap. When a runtime of the project
- * is live, the byte stream is piped straight through to that runtime's host
- * (orchestrator `PUT /store/put`, pinned with `X-Preferred-Agent`) and the
- * resulting agent fetch URL is recorded as the bundle artifact — the next
- * start fetches locally. When nothing runs, the stream is uploaded to
- * platform storage (`bundles/<buildId>.zip`) so a later start can sign and
- * fetch it; draining it instead forced every cold start onto the bare source
- * archive, which has no interpreter and no dependencies. The GitHub Actions
- * artifact stays as the CI-side backup in both cases.
- *
- * Peak Node memory is kilobytes: hashing, counting and cap enforcement ride
- * a single streaming pass, never a Buffer.
+ * CI-built bundles never touch platform storage or Node's heap. When a
+ * runtime of the project is live, the byte stream is piped straight through
+ * to that runtime's host (orchestrator `PUT /store/put`, pinned with
+ * `X-Preferred-Agent`) and the resulting agent fetch URL is recorded as the
+ * bundle artifact — the next start fetches locally. When nothing runs, the
+ * stream is drained and discarded: the bundle stays only as the GitHub
+ * Actions artifact (7-day retention), and its run URL is recorded so the
+ * dashboard can link it. At start time a stored-bundle marker is resolved by
+ * streaming the artifact straight from GitHub to the agent (see the build
+ * bundle proxy route), never from a platform copy.
  */
 
 /** Largest bundle the control plane accepts. Runtimes with more footprint
@@ -111,52 +107,25 @@ export async function deliverBundle(input: BundleDeliveryInput): Promise<Finaliz
   const live = projectId && userId ? await findLiveTarget(userId, projectId) : null;
 
   if (!live) {
-    // Nothing runs: the bundle lands in platform storage so the next start
-    // can fetch and sign it. Draining it instead made every cold start run
-    // from the bare source archive — no interpreter, no node_modules — which
-    // is exactly how "node: not found" happened on a host shipping no
-    // toolchain. The GitHub artifact stays as the CI-side backup either way.
+    // Nothing runs: drain (hashing and capping on the way past) and record
+    // where the bytes actually live — the CI artifact.
     const hash = crypto.createHash("sha256");
     let bytes = 0;
-    let tooLarge = false;
-    const body = new ReadableStream<Uint8Array>({
-      async start(controller) {
-        try {
-          let seen = 0;
-          for await (const chunk of input.file) {
-            seen += chunk.length;
-            if (seen > MAX_BUNDLE_BYTES) {
-              tooLarge = true;
-              throw new BundleTooLarge();
-            }
-            bytes = seen;
-            hash.update(chunk);
-            controller.enqueue(chunk);
-          }
-          controller.close();
-        } catch (err) {
-          controller.error(err);
-        }
-      },
-    });
-
-    const storagePath = `bundles/${buildId}.zip`;
     try {
-      await uploadObjectStream(BUNDLE_BUCKET, storagePath, body, "application/zip");
+      for await (const chunk of input.file) {
+        bytes += chunk.length;
+        if (bytes > MAX_BUNDLE_BYTES) throw new BundleTooLarge();
+        hash.update(chunk);
+      }
     } catch (err) {
-      if (tooLarge) {
+      if (err instanceof BundleTooLarge) {
         return {
           status: 413,
           body: { error: { code: "BUNDLE_TOO_LARGE", message: "Bundle exceeds the 300MB limit" } },
         };
       }
-      logger.error({ err, buildId }, "Bundle upload to platform storage failed");
-      return {
-        status: 502,
-        body: { error: { code: "STORE_FAILED", message: "Could not store the runtime bundle" } },
-      };
+      throw err;
     }
-
     const sha256 = hash.digest("hex");
     if (bytes === 0) {
       return {
@@ -168,7 +137,7 @@ export async function deliverBundle(input: BundleDeliveryInput): Promise<Finaliz
       await recordBundleArtifact(buildId, {
         sha256,
         sizeBytes: bytes,
-        storagePath,
+        storagePath: runUrl ?? `github-artifacts:bundle-${buildId}`,
       });
     } catch {
       return {
@@ -177,10 +146,10 @@ export async function deliverBundle(input: BundleDeliveryInput): Promise<Finaliz
       };
     }
     if (projectId) await touchProjectActivity(projectId);
-    logger.info({ buildId, bytes, sha256, storagePath, runUrl }, "Bundle stored in platform storage; no runtime running");
+    logger.info({ buildId, bytes, sha256, runUrl }, "Bundle kept in CI artifacts; no runtime running");
     return {
       status: 200,
-      body: { ok: true, stored: true, location: "supabase", run_url: runUrl, sha256, bytes },
+      body: { ok: true, stored: false, location: "github-artifacts", run_url: runUrl, sha256, bytes },
     };
   }
 

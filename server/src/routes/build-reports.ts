@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { supabase } from "../db/index.js";
-import { updateBuildStatus, getBuild } from "../services/build-service.js";
+import { updateBuildStatus, getBuild, githubToken } from "../services/build-service.js";
 import { deliverBundle } from "../services/bundle-delivery.js";
 import type { FinalizeOutcome } from "../services/upload-finalize.js";
 import { logger } from "../utils/logger.js";
@@ -174,6 +174,87 @@ export async function buildReportRoutes(app: FastifyInstance): Promise<void> {
       }
       return;
     }
+  });
+
+  // Streams a CI-built runtime bundle straight from the GitHub Actions artifact
+  // to whoever holds the build id — the sandbox agent at start time. Nothing is
+  // stored: the bytes flow from GitHub through this process to the caller, so a
+  // project whose host ships no toolchain can still run a self-contained bundle.
+  app.get("/builds/:id/bundle", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const { data: row, error } = await supabase
+      .from("artifacts")
+      .select("url")
+      .eq("build_id", id)
+      .eq("name", "bundle.zip")
+      .single();
+    if (error || !row?.url) {
+      return reply.status(404).send({
+        error: { code: "BUNDLE_NOT_FOUND", message: "Bundle artifact not found" },
+      });
+    }
+
+    const match = row.url.match(
+      /^https:\/\/github\.com\/([^/]+\/[^/]+)\/actions\/runs\/(\d+)$/
+    );
+    if (!match) {
+      return reply.status(400).send({
+        error: { code: "INVALID_BUNDLE_URL", message: "Bundle artifact is not a GitHub run URL" },
+      });
+    }
+    const [, repo, runId] = match;
+
+    let artifacts: { archive_download_url: string; name: string }[];
+    try {
+      const gh = await fetch(
+        `https://api.github.com/repos/${repo}/actions/runs/${runId}/artifacts`,
+        {
+          headers: {
+            Authorization: `Bearer ${githubToken()}`,
+            Accept: "application/vnd.github+json",
+          },
+        }
+      );
+      if (!gh.ok) {
+        logger.error({ buildId: id, status: gh.status }, "GitHub artifact list failed");
+        return reply.status(502).send({
+          error: { code: "GITHUB_ARTIFACT_FAILED", message: "Could not list GitHub artifacts" },
+        });
+      }
+      const body = (await gh.json()) as {
+        artifacts?: { name: string; archive_download_url: string }[];
+      };
+      artifacts = (body.artifacts ?? []).filter(
+        (a: { name: string }) => a.name === `bundle-${id}.zip`
+      );
+    } catch (err) {
+      logger.error({ err, buildId: id }, "GitHub artifact list failed");
+      return reply.status(502).send({
+        error: { code: "GITHUB_ARTIFACT_FAILED", message: "Could not list GitHub artifacts" },
+      });
+    }
+
+    const artifact = artifacts[0];
+    if (!artifact) {
+      return reply.status(404).send({
+        error: { code: "BUNDLE_NOT_FOUND", message: "Bundle artifact not found in GitHub Actions" },
+      });
+    }
+
+    // Stream straight through: the sandbox agent fetches this URL and verifies
+    // the sha256 on arrival, so nothing is buffered here.
+    const zip = await fetch(artifact.archive_download_url, {
+      headers: { Authorization: `Bearer ${githubToken()}` },
+    });
+    if (!zip.ok) {
+      logger.error({ buildId: id, status: zip.status }, "GitHub artifact download failed");
+      return reply.status(502).send({
+        error: { code: "GITHUB_ARTIFACT_FAILED", message: "Could not download bundle artifact" },
+      });
+    }
+
+    reply.header("content-type", "application/zip");
+    return reply.send(zip.body as unknown as NodeJS.ReadableStream);
   });
 
   app.post("/builds/:id/report", async (req, reply) => {

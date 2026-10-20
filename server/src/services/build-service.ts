@@ -7,7 +7,7 @@ import { v4 as uuidv4 } from "uuid";
 // Read per call, not captured at import: the admin panel can rotate these
 // values into process.env at runtime, and a captured constant would stay stale
 // until the next restart.
-const githubToken = () => process.env.GITHUB_TOKEN || "";
+export const githubToken = () => process.env.GITHUB_TOKEN || "";
 const githubRepo = () => process.env.GITHUB_REPO || "Ship-it-labs/opencode-plugin";
 
 export async function createBuild(
