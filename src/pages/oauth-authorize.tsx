@@ -11,17 +11,24 @@ import {
 } from "@/components/site/AuthLayout";
 
 /**
- * OAuth consent screen for the first-party OpenCode plugin. Arrived at from
- * the plugin via the system browser with client_id, redirect_uri (loopback
- * only), state and a PKCE challenge. If the visitor is not signed in, an
- * inline login comes first; the decision POST then approves or denies, and
- * the server hands back the exact URL to navigate to — the page never builds
- * redirect URLs itself, because the redirect target is untrusted input.
+ * OAuth consent screen for the first-party clients. Arrived at from the
+ * client via the system browser with client_id, redirect_uri, state and a PKCE
+ * challenge. If the visitor is not signed in, an inline login comes first; the
+ * decision POST then approves or denies, and the server hands back the exact
+ * URL to navigate to — the page never builds redirect URLs itself, because the
+ * redirect target is untrusted input.
+ *
+ * Two clients exist: the OpenCode plugin (deprecated, still working) and the
+ * MCP server. They get the same ceremony under different names.
  */
 export function OAuthAuthorizePage() {
-  usePageTitle("Authorize OpenCode");
   const [params] = useSearchParams();
   const { user, signIn, loading } = useAuth();
+
+  const clientId = params.get("client_id") ?? "";
+  const appName = clientId === "mcp" ? "Ship-It MCP" : "OpenCode";
+
+  usePageTitle(`Authorize ${appName}`);
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -29,7 +36,7 @@ export function OAuthAuthorizePage() {
   const [busy, setBusy] = useState(false);
 
   const request = {
-    client_id: params.get("client_id") ?? "",
+    client_id: clientId,
     redirect_uri: params.get("redirect_uri") ?? "",
     response_type: params.get("response_type") ?? "",
     state: params.get("state") ?? "",
@@ -99,7 +106,7 @@ export function OAuthAuthorizePage() {
     return (
       <AuthLayout
         title="Sign in to authorize"
-        subtitle="OpenCode is asking for access to your Ship-It account. Sign in first, then decide."
+        subtitle={`${appName} is asking for access to your Ship-It account. Sign in first, then decide.`}
         footer={<></>}
       >
         <form onSubmit={onLogin} className="space-y-5">
@@ -130,12 +137,12 @@ export function OAuthAuthorizePage() {
 
   return (
     <AuthLayout
-      title="Authorize OpenCode"
-      subtitle={`${user.email} is signed in. OpenCode will be able to act as you: submit builds, run runtimes, and read their output.`}
+      title={`Authorize ${appName}`}
+      subtitle={`${user.email} is signed in. ${appName} will be able to act as you: submit builds, run runtimes, and read their output.`}
       footer={<></>}
     >
       <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4 text-sm text-zinc-400">
-        <p className="font-medium text-white">OpenCode is requesting:</p>
+        <p className="font-medium text-white">{appName} is requesting:</p>
         <ul className="mt-2 list-disc space-y-1 pl-5">
           <li>Submit builds and read their logs</li>
           <li>Start, stop and inspect runtimes</li>

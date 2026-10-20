@@ -18,9 +18,10 @@ function isApiKey(token: string): boolean {
 
 /**
  * Resolves the user id for a bearer token. Two credential types are accepted:
- * a long-lived account API key, which the OpenCode plugin uses, and a session
- * token issued by login, which the dashboard uses. Both end up on the same user
- * row so the AI and the human see the same account and quota.
+ * a long-lived account API key, which the OpenCode plugin and MCP clients
+ * use, and a session token issued by login, which the dashboard uses. Both
+ * end up on the same user row so the AI and the human see the same account
+ * and quota.
  *
  * Returns the key row too, because rotating or revoking the key the caller is
  * holding needs to be treated differently from touching any other key: the
@@ -40,7 +41,7 @@ async function resolveUserId(
 
     // An expired key is not an invalid key. Saying so would send someone
     // re-checking a token they know is typed correctly.
-    if (data.expires_at && new Date(data.expires_at).getTime() <= Date.now()) {
+    if (data.expires_at && new Date(data.expires_at as string).getTime() <= Date.now()) {
       return null;
     }
 
@@ -70,34 +71,29 @@ async function resolveUserId(
   }
 }
 
-export async function authenticateApiKey(
-  req: FastifyRequest,
-  reply: FastifyReply
-): Promise<void> {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
-    reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "Missing credentials" } });
-    return;
-  }
+type AuthOutcome =
+  | { ok: true; auth: AuthenticatedRequest }
+  | { ok: false; code: string; message: string; status: number };
 
-  const token = authHeader.slice(7).trim();
-  if (!token) {
-    reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "Missing credentials" } });
-    return;
-  }
+/**
+ * Resolves a bearer token into an authenticated caller, or explains why it
+ * cannot. Shared by the HTTP guard and by the MCP server, which needs the
+ * same rules without refusing the request outright: its `login` tool has to
+ * work before any credential exists.
+ */
+async function resolveAuth(token: string): Promise<AuthOutcome> {
   const resolved = await resolveUserId(token);
 
   if (!resolved) {
     const expired = await isExpiredKey(token);
-    reply.status(401).send({
-      error: {
-        code: expired ? "KEY_EXPIRED" : "UNAUTHORIZED",
-        message: expired
-          ? "This API key has expired. Create a new one."
-          : "Invalid credentials",
-      },
-    });
-    return;
+    return {
+      ok: false,
+      code: expired ? "KEY_EXPIRED" : "UNAUTHORIZED",
+      message: expired
+        ? "This API key has expired. Create a new one."
+        : "Invalid credentials",
+      status: 401,
+    };
   }
 
   const userId = resolved.userId;
@@ -109,13 +105,12 @@ export async function authenticateApiKey(
   if (!isApiKey(token)) {
     const known = await hasSessionRow(userId, token);
     if (!known) {
-      reply.status(401).send({
-        error: {
-          code: "SESSION_REVOKED",
-          message: "This session is no longer valid. Sign in again.",
-        },
-      });
-      return;
+      return {
+        ok: false,
+        code: "SESSION_REVOKED",
+        message: "This session is no longer valid. Sign in again.",
+        status: 401,
+      };
     }
   }
 
@@ -126,21 +121,19 @@ export async function authenticateApiKey(
     .single();
 
   if (userError || !user) {
-    reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "User not found" } });
-    return;
+    return { ok: false, code: "UNAUTHORIZED", message: "User not found", status: 401 };
   }
 
   // Disabled by an admin. A 403 rather than 401: the credentials are valid,
   // the account is not, and conflating the two sends people to reset a
   // password that was never the problem.
   if (user.is_active === false || user.is_active === 0) {
-    reply.status(403).send({
-      error: {
-        code: "ACCOUNT_DISABLED",
-        message: "This account has been disabled. Contact support.",
-      },
-    });
-    return;
+    return {
+      ok: false,
+      code: "ACCOUNT_DISABLED",
+      message: "This account has been disabled. Contact support.",
+      status: 403,
+    };
   }
 
   const { data: planRow, error: planError } = await supabase
@@ -177,12 +170,16 @@ export async function authenticateApiKey(
   }
 
   if (!plan) {
-    // Names the dangling tier instead of a bare 401: the usual causes are an
-    // unseeded plans table (run PROD_SETUP.sql or reboot so seedPlans fills
-    // it) or a retired tier id (e.g. plus without migration 0008).
+    // Names the dangling tier instead of a bare 401: the usual causes are
+    // an unseeded plans table (run PROD_SETUP.sql or reboot so seedPlans
+    // fills it) or a retired tier id (e.g. plus without migration 0008).
     logger.warn({ userId: user.id, planId: user.plan_id }, "Plan row missing for account tier");
-    reply.status(401).send({ error: { code: "UNAUTHORIZED", message: `Plan not found: ${user.plan_id}` } });
-    return;
+    return {
+      ok: false,
+      code: "UNAUTHORIZED",
+      message: `Plan not found: ${user.plan_id}`,
+      status: 401,
+    };
   }
 
   if (isApiKey(token)) {
@@ -192,9 +189,55 @@ export async function authenticateApiKey(
       .eq("key_hash", hashApiKey(token));
   }
 
-  req.auth = { userId: user.id, plan: plan as Plan, apiKeyId: resolved.apiKeyId };
+  return { ok: true, auth: { userId: user.id, plan: plan as Plan, apiKeyId: resolved.apiKeyId } };
+}
 
-  logger.debug({ userId: user.id }, "Request authenticated");
+export async function authenticateApiKey(
+  req: FastifyRequest,
+  reply: FastifyReply
+): Promise<void> {
+  const authHeader = req.headers.authorization;
+  if (!authHeader?.startsWith("Bearer ")) {
+    reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "Missing credentials" } });
+    return;
+  }
+
+  const token = authHeader.slice(7).trim();
+  if (!token) {
+    reply.status(401).send({ error: { code: "UNAUTHORIZED", message: "Missing credentials" } });
+    return;
+  }
+
+  const outcome = await resolveAuth(token);
+  if (!outcome.ok) {
+    reply.status(outcome.status).send({
+      error: { code: outcome.code, message: outcome.message },
+    });
+    return;
+  }
+
+  req.auth = outcome.auth;
+  logger.debug({ userId: outcome.auth.userId }, "Request authenticated");
+}
+
+/**
+ * Resolves the caller without refusing the request. The MCP server needs
+ * this: its `login` tool has to work before any credential exists, and every
+ * other tool reports "sign in first" itself.
+ */
+export async function optionalAuth(req: FastifyRequest): Promise<AuthenticatedRequest | null> {
+  const authHeader = req.headers.authorization;
+  const token =
+    typeof authHeader === "string" && authHeader.startsWith("Bearer ")
+      ? authHeader.slice(7).trim()
+      : "";
+  if (!token) return null;
+  try {
+    const outcome = await resolveAuth(token);
+    return outcome.ok ? outcome.auth : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -226,6 +269,7 @@ export async function optionalAuthUserId(req: FastifyRequest): Promise<string | 
     return null;
   }
 }
+
 async function isExpiredKey(token: string): Promise<boolean> {
   if (!token.startsWith("ox_live_") && !token.startsWith("ox_test_")) {
     return false;

@@ -5,7 +5,7 @@ import { publicBaseUrl } from "../config/urls.js";
 import { supabase } from "../db/index.js";
 import { getQuotaStatus } from "../services/quota-service.js";
 import { callOrchestrator } from "../services/orchestrator-client.js";
-import { latestBundleArtifact } from "../services/build-service.js";
+import { latestBundleArtifact, bundleArtifactForBuild } from "../services/build-service.js";
 import { decryptEnvVars, projectEnvKey } from "../utils/env-crypto.js";
 import { isAgentStoreUrl } from "../utils/agent-store.js";
 import { isGithubArtifactUrl } from "../services/bundle-delivery.js";
@@ -14,6 +14,10 @@ import { logger } from "../utils/logger.js";
 
 const startSchema = z.object({
   project_id: z.string().min(1),
+  // Which build to run. "latest" (or omitted) takes the newest successful
+  // build's bundle; a build id runs that exact build's bundle, so a start is
+  // never silently a different code than the one that was asked for.
+  build_id: z.string().min(1).optional(),
 });
 
 // How long the agent may hold the archive link. The download begins
@@ -192,7 +196,29 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
       let bundleUrl = "";
       let bundleSha256 = "";
       try {
-        const bundle = await latestBundleArtifact(userId, projectId);
+        // A caller may name the build to run. Anything other than "latest"
+        // must be that exact build's bundle, so a start never silently runs
+        // different code than the one that was asked for.
+        const requestedBuild = parsed.data.build_id?.trim();
+        const specificBuild =
+          requestedBuild && requestedBuild !== "latest" ? requestedBuild : null;
+
+        if (specificBuild) {
+          const exact = await bundleArtifactForBuild(userId, projectId, specificBuild);
+          if (!exact) {
+            return reply.status(404).send({
+              error: {
+                code: "BUILD_NOT_FOUND",
+                message: `Build ${specificBuild} has no runtime bundle for this project.`,
+              },
+            });
+          }
+          logger.info({ projectId, buildId: specificBuild }, "Running an exact build");
+        }
+
+        const bundle = specificBuild
+          ? await bundleArtifactForBuild(userId, projectId, specificBuild)
+          : await latestBundleArtifact(userId, projectId);
         if (bundle) {
           if (isAgentStoreUrl(bundle.storage_path)) {
             bundleUrl = bundle.storage_path;

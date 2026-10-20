@@ -399,6 +399,42 @@ export async function latestBundleArtifact(
   return null;
 }
 
+/**
+ * The bundle of one specific build, provided the build belongs to this
+ * account and this project. Used when a caller asks to run an exact build
+ * rather than the newest one: "run this build" must never quietly become
+ * "run whatever was built last".
+ */
+export async function bundleArtifactForBuild(
+  userId: string,
+  projectId: string,
+  buildId: string
+): Promise<BundleArtifact | null> {
+  const { data: build, error: buildError } = await supabase
+    .from("builds")
+    .select("id, user_id, project_id")
+    .eq("id", buildId)
+    .single();
+  if (buildError || !build) return null;
+  const row = build as { user_id?: string; project_id?: string };
+  if (row.user_id !== userId || row.project_id !== projectId) return null;
+
+  const { data: artifact, error: artifactError } = await supabase
+    .from("artifacts")
+    .select("build_id, sha256, size, url")
+    .eq("build_id", buildId)
+    .eq("name", "bundle.zip")
+    .single();
+  if (artifactError || !artifact?.url) return null;
+
+  return {
+    build_id: buildId,
+    storage_path: artifact.url as string,
+    sha256: artifact.sha256 as string,
+    size_bytes: artifact.size as number,
+  };
+}
+
 export async function updateBuildStatus(
   buildId: string,
   status: Build["status"],

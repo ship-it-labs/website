@@ -63,7 +63,7 @@ describe("MCP handshake", () => {
     const response = await handleMcpMessage(context({}), {
       jsonrpc: "2.0",
       id: 7,
-      method: "resources/read",
+      method: "sampling/createMessage",
     });
     expect(response?.error?.code).toBe(-32601);
   });
@@ -118,7 +118,6 @@ describe("MCP tool calls run as the caller", () => {
     const payload = JSON.parse(result.content[0].text) as { seen: string };
     expect(payload.seen).toBe("Bearer ox_live_abc");
   });
-
   it("reports a platform failure as a tool error, not a crash", async () => {
     const app = Fastify();
     app.get("/api/v1/builds/:id", async (_req, reply) =>
@@ -158,5 +157,137 @@ describe("MCP tool calls run as the caller", () => {
     const result = response?.result as { isError?: boolean; content: Array<{ text: string }> };
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("build_id");
+  });
+
+  it("asks an unauthenticated caller to sign in first", async () => {
+    const response = await handleMcpMessage(context({}, ""), {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "list_projects", arguments: {} },
+    });
+
+    const result = response?.result as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("login");
+  });
+});
+
+describe("MCP login", () => {
+  it("hands back an authorization page and a session id", async () => {
+    const response = await handleMcpMessage(context({}, ""), {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "login", arguments: {} },
+    });
+
+    const result = response?.result as { content: Array<{ text: string }> };
+    const payload = JSON.parse(result.content[0].text) as {
+      status: string;
+      session_id: string;
+      authorize_url: string;
+    };
+    expect(payload.status).toBe("authorize");
+    expect(payload.session_id.length).toBeGreaterThan(20);
+    expect(payload.authorize_url).toContain("/oauth/authorize");
+    expect(payload.authorize_url).toContain("client_id=mcp");
+  });
+
+  it("reports a login nobody approved yet as pending", async () => {
+    const first = await handleMcpMessage(context({}, ""), {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "login", arguments: {} },
+    });
+    const payload = JSON.parse(
+      (first?.result as { content: Array<{ text: string }> }).content[0].text
+    ) as { session_id: string };
+
+    const second = await handleMcpMessage(context({}, ""), {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "tools/call",
+      params: { name: "login", arguments: { session_id: payload.session_id, wait_seconds: 0 } },
+    });
+    const status = JSON.parse(
+      (second?.result as { content: Array<{ text: string }> }).content[0].text
+    ) as { status: string };
+    expect(status.status).toBe("pending");
+  });
+
+  it("refuses an unknown session", async () => {
+    const response = await handleMcpMessage(context({}, ""), {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: { name: "login", arguments: { session_id: "not-a-real-session" } },
+    });
+    const result = response?.result as { isError?: boolean; content: Array<{ text: string }> };
+    expect(result.isError).toBe(true);
+  });
+});
+
+describe("MCP documentation resources", () => {
+  it("lists the manual as resources", async () => {
+    const response = await handleMcpMessage(context({}), {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "resources/list",
+    });
+    const result = response?.result as {
+      resources: Array<{ uri: string; name: string; mimeType: string }>;
+    };
+    expect(result.resources.length).toBeGreaterThan(0);
+    expect(result.resources[0].uri.startsWith("shipit://docs/")).toBe(true);
+    expect(result.resources[0].mimeType).toBe("text/markdown");
+  });
+
+  it("reads a section of the manual", async () => {
+    const listed = await handleMcpMessage(context({}), {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "resources/list",
+    });
+    const resources = (listed?.result as { resources: Array<{ uri: string }> }).resources;
+
+    const response = await handleMcpMessage(context({}), {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "resources/read",
+      params: { uri: resources[0].uri },
+    });
+    const result = response?.result as { contents: Array<{ text: string }> };
+    expect(result.contents[0].text.length).toBeGreaterThan(0);
+  });
+
+  it("refuses a resource that does not exist", async () => {
+    const response = await handleMcpMessage(context({}), {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "resources/read",
+      params: { uri: "shipit://docs/nope" },
+    });
+    expect(response?.error?.code).toBe(-32602);
+  });
+
+  it("offers a guide prompt carrying the manual", async () => {
+    const list = await handleMcpMessage(context({}), {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "prompts/list",
+    });
+    const prompts = (list?.result as { prompts: Array<{ name: string }> }).prompts;
+    expect(prompts.map((prompt) => prompt.name)).toContain("shipit-guide");
+
+    const response = await handleMcpMessage(context({}), {
+      jsonrpc: "2.0",
+      id: 2,
+      method: "prompts/get",
+      params: { name: "shipit-guide", arguments: { topic: "runtimes" } },
+    });
+    const result = response?.result as { messages: Array<{ content: { text: string } }> };
+    expect(result.messages[0].content.text).toContain("runtimes");
   });
 });

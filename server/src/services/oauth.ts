@@ -3,6 +3,12 @@ import { randomUUID } from "node:crypto";
 import { supabase, type Database } from "../db/index.js";
 import { generateApiKey } from "../utils/api-key.js";
 import { logger } from "../utils/logger.js";
+import {
+  MCP_OAUTH_CLIENT_ID,
+  getMcpLoginSession,
+  isMcpLoginRedirectUri,
+  mcpSessionIdFromUri,
+} from "./mcp-login.js";
 
 /**
  * OAuth 2.0 authorization-code flow with PKCE, for the first-party OpenCode
@@ -19,7 +25,6 @@ import { logger } from "../utils/logger.js";
 export const OAUTH_CLIENT_ID = "opencode";
 export const OAUTH_APP_NAME = "OpenCode";
 const CODE_TTL_MS = 10 * 60_000;
-
 export class OAuthError extends Error {
   readonly code: string;
   constructor(code: string, message: string) {
@@ -58,8 +63,29 @@ export function validateRedirectUri(raw: unknown): string {
   return url.toString();
 }
 
+/**
+ * The MCP redirect target: the callback this server issued for a live login
+ * session. The target is rebuilt from the session, never taken from the
+ * request, so a crafted URL cannot borrow someone else's session.
+ */
+export function validateMcpRedirect(raw: unknown, state: unknown): string {
+  const sessionId = mcpSessionIdFromUri(raw);
+  const session = sessionId ? getMcpLoginSession(sessionId) : undefined;
+  if (!session || !isMcpLoginRedirectUri(raw, session)) {
+    throw new OAuthError("INVALID_REDIRECT", "redirect_uri is not a known login callback");
+  }
+  if (session.state !== state) {
+    throw new OAuthError("INVALID_REQUEST", "state does not match the login session");
+  }
+  return raw as string;
+}
+
 export function validateClientId(clientId: unknown): void {
-  if (clientId !== OAUTH_CLIENT_ID) {
+  // Two first-party clients: the (deprecated but working) OpenCode plugin,
+  // which runs on the user's machine and therefore uses a loopback redirect,
+  // and the MCP server, which lives on the platform and uses the callback
+  // this server issued for the login session.
+  if (clientId !== OAUTH_CLIENT_ID && clientId !== MCP_OAUTH_CLIENT_ID) {
     throw new OAuthError("INVALID_CLIENT", "Unknown OAuth client");
   }
 }
@@ -106,7 +132,13 @@ export async function createAuthCode(
   nowMs: number = Date.now()
 ): Promise<{ code: string }> {
   validateClientId(input.clientId);
-  validateRedirectUri(input.redirectUri);
+  if (input.clientId === MCP_OAUTH_CLIENT_ID) {
+    // The MCP server cannot receive a loopback callback, so it uses one this
+    // server issued for a live login session.
+    validateMcpRedirect(input.redirectUri, input.state);
+  } else {
+    validateRedirectUri(input.redirectUri);
+  }
   validateState(input.state);
   if (typeof input.codeChallenge !== "string" || input.codeChallenge.length === 0) {
     throw new OAuthError("INVALID_REQUEST", "code_challenge is required");
@@ -119,7 +151,7 @@ export async function createAuthCode(
   const { error } = await db.from("oauth_codes").insert({
     id: hashCode(code),
     user_id: input.userId,
-    client_id: OAUTH_CLIENT_ID,
+    client_id: input.clientId as string,
     redirect_uri: input.redirectUri as string,
     code_challenge: input.codeChallenge,
     expires_at: new Date(nowMs + CODE_TTL_MS).toISOString(),
@@ -170,7 +202,7 @@ export async function exchangeCode(
 
   const { data, error } = await db
     .from("oauth_codes")
-    .select("user_id, redirect_uri, code_challenge, expires_at")
+    .select("user_id, client_id, redirect_uri, code_challenge, expires_at")
     .eq("id", hashCode(input.code))
     .single();
 
@@ -179,6 +211,7 @@ export async function exchangeCode(
   }
   const row = data as {
     user_id: string;
+    client_id?: string | null;
     redirect_uri: string;
     code_challenge: string;
     expires_at: string;
@@ -197,12 +230,14 @@ export async function exchangeCode(
   verifyPkce(input.codeVerifier, row.code_challenge);
 
   const { key, hash, prefix } = generateApiKey();
+  const keyName =
+    row.client_id === MCP_OAUTH_CLIENT_ID ? "MCP (OAuth)" : "OpenCode (OAuth)";
   const { error: keyError } = await db.from("api_keys").insert({
     id: randomUUID(),
     user_id: row.user_id,
     key_hash: hash,
     key_prefix: prefix,
-    name: "OpenCode (OAuth)",
+    name: keyName,
     is_active: true,
   });
   if (keyError) {

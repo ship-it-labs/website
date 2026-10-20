@@ -1,4 +1,5 @@
 import { MCP_TOOLS, mcpTool, type McpToolContext, type McpToolResult } from "./tools.js";
+import { DOC_SECTIONS, docsDigest } from "../services/agent-docs.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -112,6 +113,98 @@ class McpProtocolError extends Error {
 }
 
 /**
+ * The platform documentation, exposed as MCP resources.
+ *
+ * A client can read the whole manual itself instead of guessing from tool
+ * names: one resource per documentation section, plus a template for the
+ * collection. The content is the same text the in-site assistant is given,
+ * so there is one source of truth.
+ */
+const DOCS_URI_PREFIX = "shipit://docs/";
+
+export function mcpResourceList(): {
+  resources: Array<{
+    uri: string;
+    name: string;
+    title: string;
+    description: string;
+    mimeType: string;
+  }>;
+} {
+  return {
+    resources: DOC_SECTIONS.map((section) => ({
+      uri: `${DOCS_URI_PREFIX}${section.id}`,
+      name: section.id,
+      title: section.title,
+      description: section.title,
+      mimeType: "text/markdown",
+    })),
+  };
+}
+
+export function mcpResourceRead(uri: string): {
+  contents: Array<{ uri: string; mimeType: string; text: string }>;
+} | null {
+  if (!uri.startsWith(DOCS_URI_PREFIX)) return null;
+  const id = uri.slice(DOCS_URI_PREFIX.length);
+  const section = DOC_SECTIONS.find((entry) => entry.id === id);
+  if (!section) return null;
+  return {
+    contents: [
+      {
+        uri,
+        mimeType: "text/markdown",
+        text: `# ${section.title}\n\n${section.body}`,
+      },
+    ],
+  };
+}
+
+export function mcpPromptList(): {
+  prompts: Array<{ name: string; description: string; arguments: Array<{ name: string; description: string; required: boolean }> }>;
+} {
+  return {
+    prompts: [
+      {
+        name: "shipit-guide",
+        description:
+          "How to drive Ship-It with these tools: projects, builds, runtimes, and the rules that apply.",
+        arguments: [
+          {
+            name: "topic",
+            description: "Optional topic to focus on, e.g. 'runtimes'.",
+            required: false,
+          },
+        ],
+      },
+    ],
+  };
+}
+
+export function mcpPromptGet(
+  name: string,
+  args: Record<string, unknown>
+): { description: string; messages: Array<{ role: string; content: { type: string; text: string } }> } | null {
+  if (name !== "shipit-guide") return null;
+  const topic = typeof args.topic === "string" ? args.topic.trim() : "";
+  const focus = topic
+    ? `\n\nThe user is working on "${topic}". Lead with the sections about it.`
+    : "";
+  return {
+    description: "How to use Ship-It",
+    messages: [
+      {
+        role: "user",
+        content: {
+          type: "text",
+          text: `Here is the Ship-It manual. Use it to answer questions about the platform and to work correctly with its tools.${focus}\n\n${docsDigest()}`,
+        },
+      },
+    ],
+  };
+}
+
+/**
  * Handles one JSON-RPC message. Returns null for notifications, which by
  * definition get no reply.
  */
@@ -173,13 +266,41 @@ export async function handleMcpMessage(
     }
 
     case "resources/list":
-      return ok(id, { resources: [] });
+      return ok(id, mcpResourceList());
 
     case "resources/templates/list":
-      return ok(id, { resourceTemplates: [] });
+      return ok(id, {
+        resourceTemplates: [
+          {
+            uriTemplate: `${DOCS_URI_PREFIX}{id}`,
+            name: "shipit-doc",
+            title: "Ship-It documentation",
+            description: "One section of the Ship-It manual.",
+            mimeType: "text/markdown",
+          },
+        ],
+      });
+
+    case "resources/read": {
+      const uri = typeof params.uri === "string" ? params.uri : "";
+      const contents = mcpResourceRead(uri);
+      if (!contents) {
+        return fail(id, INVALID_PARAMS, `Unknown resource: ${uri}`);
+      }
+      return ok(id, contents);
+    }
 
     case "prompts/list":
-      return ok(id, { prompts: [] });
+      return ok(id, mcpPromptList());
+
+    case "prompts/get": {
+      const name = typeof params.name === "string" ? params.name : "";
+      const prompt = mcpPromptGet(name, paramsOf(params.arguments));
+      if (!prompt) {
+        return fail(id, INVALID_PARAMS, `Unknown prompt: ${name}`);
+      }
+      return ok(id, prompt);
+    }
 
     case "logging/setLevel":
       return ok(id, {});

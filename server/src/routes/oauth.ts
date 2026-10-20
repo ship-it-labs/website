@@ -6,10 +6,12 @@ import { checkRateLimit } from "../services/rate-limit.js";
 import {
   OAuthError,
   OAUTH_APP_NAME,
+  validateMcpRedirect,
   validateRedirectUri,
   createAuthCode,
   exchangeCode,
 } from "../services/oauth.js";
+import { MCP_OAUTH_CLIENT_ID } from "../services/mcp-login.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -84,7 +86,10 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
     // never via redirect, so a crafted URI cannot launder our messages.
     let redirect: string;
     try {
-      redirect = validateRedirectUri(body.redirect_uri);
+      redirect =
+        body.client_id === MCP_OAUTH_CLIENT_ID
+          ? validateMcpRedirect(body.redirect_uri, body.state)
+          : validateRedirectUri(body.redirect_uri);
     } catch (err) {
       return oauthError(reply, err);
     }

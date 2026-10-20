@@ -4,6 +4,11 @@ import { searchDocs } from "../services/agent-docs.js";
 import { finalizeProjectUpload } from "../services/upload-finalize.js";
 import { isReachableFromTheInternet } from "../services/build-executor.js";
 import { LANGUAGES } from "../services/languages.js";
+import {
+  consumeMcpLoginToken,
+  createMcpLoginSession,
+  getMcpLoginSession,
+} from "../services/mcp-login.js";
 
 /**
  * The tools the MCP server exposes.
@@ -53,6 +58,9 @@ interface RestCall {
 
 /** Turns a REST response into an MCP tool result, preserving the error code. */
 async function rest(ctx: McpToolContext, call: RestCall): Promise<McpToolResult> {
+  if (!ctx.token) {
+    return notSignedIn();
+  }
   let response;
   try {
     response = await ctx.app.inject({
@@ -111,7 +119,138 @@ function strList(args: Record<string, unknown>, key: string): string[] {
   return value.filter((entry): entry is string => typeof entry === "string");
 }
 
+/** The one message every tool that needs an account gives before sign-in. */
+function notSignedIn(): McpToolResult {
+  return {
+    content: [
+      {
+        type: "text",
+        text: "Not signed in. Call the login tool first: it returns a page for the user to open, sign in and approve, then hands you an access token.",
+      },
+    ],
+    isError: true,
+  };
+}
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 export const MCP_TOOLS: McpTool[] = [
+  {
+    name: "login",
+    description:
+      "Sign in to Ship-It. The first call returns an authorization page for the user to open in their browser, sign in and approve. Call it again with the returned session id to collect the access token, and pass that token as the Authorization bearer on every later request.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        session_id: {
+          type: "string",
+          description: "The session id from the first call. Omit to start a new login.",
+        },
+        wait_seconds: {
+          type: "number",
+          description: "How long to wait for the user to approve, 0-120. Default 30.",
+        },
+      },
+    },
+    handler: async (_ctx, args) => {
+      const sessionId = optStr(args, "session_id");
+
+      if (!sessionId) {
+        const { session, authorizeUrl } = createMcpLoginSession();
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  status: "authorize",
+                  session_id: session.id,
+                  authorize_url: authorizeUrl,
+                  expires_in_seconds: Math.round((session.expiresAt - Date.now()) / 1000),
+                  instructions:
+                    "Ask the user to open authorize_url in their browser, sign in if they are not already, and approve the request. Then call login again with this session_id to collect the access token.",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      const asked = Number(args.wait_seconds ?? 30);
+      const waitSeconds = Number.isFinite(asked) ? Math.min(Math.max(asked, 0), 120) : 30;
+      const deadline = Date.now() + waitSeconds * 1000;
+
+      let session = getMcpLoginSession(sessionId);
+      while (session && session.status === "pending" && Date.now() < deadline) {
+        await sleep(1000);
+        session = getMcpLoginSession(sessionId);
+      }
+
+      if (!session) {
+        return {
+          content: [{ type: "text", text: "Unknown or expired login session. Start a new login." }],
+          isError: true,
+        };
+      }
+      if (session.status === "denied") {
+        return {
+          content: [{ type: "text", text: "The user denied the authorization." }],
+          isError: true,
+        };
+      }
+      if (session.status === "expired") {
+        return {
+          content: [{ type: "text", text: "The login expired. Start a new login." }],
+          isError: true,
+        };
+      }
+      if (session.status === "approved") {
+        const token = consumeMcpLoginToken(sessionId);
+        if (!token) {
+          return {
+            content: [
+              { type: "text", text: "That access token was already collected. Start a new login." },
+            ],
+            isError: true,
+          };
+        }
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  status: "approved",
+                  access_token: token.accessToken,
+                  token_type: "Bearer",
+                  user_id: token.userId,
+                  instructions:
+                    "Send `Authorization: Bearer <access_token>` on every later request to this server.",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({
+              status: "pending",
+              session_id: sessionId,
+              message: "The user has not approved yet. Call login again with the same session_id.",
+            }),
+          },
+        ],
+      };
+    },
+  },
   {
     name: "list_projects",
     description:
@@ -147,6 +286,9 @@ export const MCP_TOOLS: McpTool[] = [
       required: ["project_id", "source_url"],
     },
     handler: async (ctx, args) => {
+      if (!ctx.token) {
+        return notSignedIn();
+      }
       let projectId: string;
       let sourceUrl: string;
       try {
@@ -340,23 +482,36 @@ export const MCP_TOOLS: McpTool[] = [
   {
     name: "start_runtime",
     description:
-      "Start a runtime for a project. The runtime runs the project's CI bundle when there is one, so the app starts with its own toolchain and dependencies.",
+      "Start a runtime for a project. The runtime runs the project's CI bundle when there is one, so the app starts with its own toolchain and dependencies. Name the build to run: a build id runs that exact build, 'latest' runs the newest successful one.",
     inputSchema: {
       type: "object",
-      properties: { project_id: { type: "string", description: "Project to run." } },
-      required: ["project_id"],
+      properties: {
+        project_id: { type: "string", description: "Project to run." },
+        build_id: {
+          type: "string",
+          description:
+            "Build to run: a build id such as 'build_ab12cd34', or 'latest' for the newest successful build.",
+        },
+      },
+      required: ["project_id", "build_id"],
     },
     handler: (ctx, args) => {
       let projectId: string;
+      let buildId: string;
       try {
         projectId = str(args, "project_id");
+        buildId = str(args, "build_id");
       } catch (err) {
         return Promise.resolve({
           content: [{ type: "text", text: (err as Error).message }],
           isError: true,
         });
       }
-      return rest(ctx, { method: "POST", url: "/api/v1/runtimes", payload: { project_id: projectId } });
+      return rest(ctx, {
+        method: "POST",
+        url: "/api/v1/runtimes",
+        payload: { project_id: projectId, build_id: buildId },
+      });
     },
   },
   {
