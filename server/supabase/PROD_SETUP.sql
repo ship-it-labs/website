@@ -33,11 +33,37 @@ create table if not exists public.api_keys (
   name text not null default 'default',
   is_active boolean not null default true,
   created_at timestamptz not null default now(),
-  last_used_at timestamptz
+  last_used_at timestamptz,
+  -- Permissions and budget (migration 0029). NULL scopes mean every
+  -- permission, which is what the keys minted before this existed have.
+  scopes text,
+  budget_minutes integer,
+  reserved_minutes integer not null default 0
 );
 
 create index if not exists idx_api_keys_user on public.api_keys(user_id);
 create index if not exists idx_api_keys_hash on public.api_keys(key_hash);
+
+-- Adds the permission and budget columns to a database created before them.
+alter table public.api_keys add column if not exists scopes text;
+alter table public.api_keys add column if not exists budget_minutes integer;
+alter table public.api_keys add column if not exists reserved_minutes integer not null default 0;
+
+-- A start reserves the session length it was granted, so a key with an hour
+-- of budget cannot start a hundred three-hour runtimes.
+create or replace function public.increment_api_key_reservation(
+  p_api_key_id uuid,
+  p_minutes integer
+)
+returns void
+language plpgsql
+as $$
+begin
+  update public.api_keys
+     set reserved_minutes = coalesce(reserved_minutes, 0) + greatest(p_minutes, 0)
+   where id = p_api_key_id;
+end;
+$$;
 
 create table if not exists public.subscriptions (
   id uuid primary key default gen_random_uuid(),
