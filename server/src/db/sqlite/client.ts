@@ -57,6 +57,12 @@ export class SqliteClient {
     this.db = new DatabaseSync(options.file);
     this.db.exec("pragma journal_mode = WAL");
     this.db.exec("pragma foreign_keys = on");
+    // The schema, migrations and seeds below are writes, and they happen at
+    // import time. Another process (a test worker, a second server, a
+    // maintenance script) holding the write lock used to fail this one
+    // immediately with SQLITE_BUSY; waiting is the difference between a
+    // retryable lock and a crash on boot.
+    this.db.exec("pragma busy_timeout = 5000");
     this.storageRoot = options.storageRoot;
     this.publicBaseUrl = options.publicBaseUrl.replace(/\/+$/, "");
     this.internalBaseUrl = options.internalBaseUrl

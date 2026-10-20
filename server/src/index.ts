@@ -36,6 +36,7 @@ import { billingRoutes, webhookRoutes } from "./routes/billing.js";
 import { clientErrorRoutes } from "./routes/client-errors.js";
 import { agentRoutes } from "./routes/agent.js";
 import { websocketRoutes } from "./websockets/index.js";
+import { mcpRoutes } from "./mcp/routes.js";
 import { startLeaseExpiryWorker } from "./services/usage-worker.js";
 import { seedPlans } from "./services/plan-service.js";
 import { probeSessionWrites } from "./services/sessions.js";
@@ -188,6 +189,11 @@ await app.register(clientErrorRoutes, { prefix: "/api/v1" });
 await app.register(agentRoutes, { prefix: "/api/v1" });
 await app.register(webhookRoutes, { prefix: "/api/v1" });
 await app.register(websocketRoutes);
+// The Model Context Protocol endpoint. It lives at the site root rather than
+// under /api/v1 because that is the path MCP clients are configured with, and
+// it is registered before the static handler so the SPA fallback never
+// swallows it.
+await app.register(mcpRoutes);
 // No /api/v1 prefix: the Go edge calls these on the loopback interface with
 // a shared secret, and they must never be mistaken for public API.
 await app.register(internalIngestRoutes);
