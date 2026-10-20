@@ -1,0 +1,36 @@
+/**
+ * The manual borrows the site's own colours so the docs feel like part of the
+ * product rather than a separate website bolted on.
+ */
+:root {
+  --ifm-color-primary: #8b5cf6;
+  --ifm-color-primary-dark: #7c3aed;
+  --ifm-color-primary-darker: #6d28d9;
+  --ifm-color-primary-darkest: #4c1d95;
+  --ifm-color-primary-light: #a78bfa;
+  --ifm-color-primary-lighter: #b794f6;
+  --ifm-color-primary-lightest: #ddd6fe;
+  --ifm-code-font-size: 92%;
+}
+
+[data-theme="dark"] {
+  --ifm-color-primary: #a78bfa;
+  --ifm-color-primary-dark: #8b5cf6;
+  --ifm-color-primary-darker: #7c3aed;
+  --ifm-color-primary-darkest: #6d28d9;
+  --ifm-color-primary-light: #c4b5fd;
+  --ifm-color-primary-lighter: #ddd6fe;
+  --ifm-color-primary-lightest: #f5f3ff;
+  --ifm-background-color: #09090b;
+  --ifm-background-surface-color: #18181b;
+}
+
+.markdown h1 {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.markdown table {
+  display: table;
+  width: 100%;
+}

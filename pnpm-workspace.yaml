@@ -1,8 +1,12 @@
 packages:
   - "."
   - server
+  - docs
 
 # esbuild and the HeroUI utility package need their install scripts.
+# core-js (a Docusaurus dependency) only prints a banner, but pnpm refuses
+# to finish an install while any build script is unapproved.
 allowBuilds:
   esbuild: true
   "@heroui/shared-utils": true
+  core-js: true

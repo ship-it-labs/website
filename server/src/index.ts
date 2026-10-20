@@ -273,6 +273,13 @@ if (fs.existsSync(FRONTEND_DIST)) {
         error: { code: "NOT_FOUND", message: "Not found" },
       });
     }
+    // The manual is a static site under /docs. A link without its trailing
+    // slash is the same page, so redirect rather than dropping the reader
+    // into the app.
+    if (req.url.startsWith("/docs")) {
+      const path = req.url.split("?")[0].split("#")[0].replace(/\/+$/, "");
+      return reply.redirect(`${path}/`, 301);
+    }
     return reply.sendFile("index.html");
   });
   logger.info({ path: FRONTEND_DIST }, "Serving frontend build");

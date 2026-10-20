@@ -12,12 +12,18 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@12.5.1 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY server/package.json ./server/
+# The manual is a workspace package of its own: its manifest has to exist
+# before the install, or pnpm cannot resolve the workspace.
+COPY docs/package.json ./docs/
 RUN pnpm install --frozen-lockfile
 COPY tsconfig.json vite.config.ts tailwind.config.js postcss.config.js index.html ./
 COPY server/tsconfig.json ./server/
 COPY src/ ./src/
 COPY public/ ./public/
 COPY server/src/ ./server/src/
+COPY docs/docusaurus.config.ts docs/sidebars.ts ./docs/
+COPY docs/docs/ ./docs/docs/
+COPY docs/src/ ./docs/src/
 RUN pnpm run build
 
 # Production install for the control plane only. The pnpm workspace keeps the
@@ -27,6 +33,7 @@ WORKDIR /deps
 RUN corepack enable && corepack prepare pnpm@12.5.1 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY server/package.json ./server/
+COPY docs/package.json ./docs/
 RUN pnpm install --prod --frozen-lockfile --filter @ship-it/website-server
 
 FROM node:22-alpine
