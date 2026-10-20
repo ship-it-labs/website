@@ -1,6 +1,6 @@
 import { FastifyInstance } from "fastify";
 import { z } from "zod";
-import { authenticateApiKey } from "../middleware/auth.js";
+import { authenticateApiKey, requireScope } from "../middleware/auth.js";
 import {
   createBuild,
   triggerGitHubActionsBuild,
@@ -66,7 +66,7 @@ export { isCommandAllowed } from "../services/command-guard.js";
 export async function buildRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authenticateApiKey);
 
-  app.post("/builds", async (req, reply) => {
+  app.post("/builds", { preHandler: requireScope("builds:write") }, async (req, reply) => {
     const parsed = buildSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.status(400).send({
@@ -187,7 +187,7 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(202).send({ build_id: build.id, status: build.status });
   });
 
-  app.get("/builds/:id", async (req, reply) => {
+  app.get("/builds/:id", { preHandler: requireScope("builds:read") }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const build = await getBuild(id);
 
@@ -203,7 +203,7 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
   // running build instead of queueing a duplicate. Otherwise creates a new
   // build row (the old one keeps its logs) and dispatches it through the
   // current executor.
-  app.post("/builds/:id/rebuild", async (req, reply) => {
+  app.post("/builds/:id/rebuild", { preHandler: requireScope("builds:write") }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const previous = await getBuild(id);
 
@@ -283,7 +283,7 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
 
   // Deletes the build plus its logs and artifact rows. Storage blobs behind
   // artifact URLs expire via bucket lifecycle instead of blocking the delete.
-  app.delete("/builds/:id", async (req, reply) => {
+  app.delete("/builds/:id", { preHandler: requireScope("builds:write") }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const build = await getBuild(id);
 
@@ -302,7 +302,7 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ deleted: true });
   });
 
-  app.get("/builds/:id/logs", async (req, reply) => {
+  app.get("/builds/:id/logs", { preHandler: requireScope("builds:read") }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const build = await getBuild(id);
 
@@ -319,7 +319,7 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ logs: logs || [] });
   });
 
-  app.get("/builds/:id/artifacts", async (req, reply) => {
+  app.get("/builds/:id/artifacts", { preHandler: requireScope("builds:read") }, async (req, reply) => {
     const { id } = req.params as { id: string };
     const build = await getBuild(id);
 
@@ -335,7 +335,7 @@ export async function buildRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ artifacts: artifacts || [] });
   });
 
-  app.get("/builds", async (req, reply) => {
+  app.get("/builds", { preHandler: requireScope("builds:read") }, async (req, reply) => {
     const builds = await listBuilds(req.auth!.userId);
     const query = req.query as { status?: string };
     const filtered = filterBuildsByStatus(builds, query.status ?? "all");

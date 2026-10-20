@@ -130,4 +130,15 @@ export interface AuthenticatedRequest {
   userId: string;
   plan: Plan;
   apiKeyId: string;
+  /**
+   * True when the caller presented an API key rather than a browser session.
+   * Keys can be limited (scopes, budget); the human's session never is.
+   */
+  isApiKey: boolean;
+  /** The permissions this key holds. null means every permission. */
+  scopes: string[] | null;
+  /** The key's runtime-minute budget. null means no cap. */
+  budgetMinutes: number | null;
+  /** Runtime minutes this key has already reserved. */
+  reservedMinutes: number;
 }

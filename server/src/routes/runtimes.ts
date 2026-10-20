@@ -1,11 +1,12 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { authenticateApiKey } from "../middleware/auth.js";
+import { authenticateApiKey, requireScope } from "../middleware/auth.js";
 import { publicBaseUrl } from "../config/urls.js";
 import { supabase } from "../db/index.js";
 import { getQuotaStatus } from "../services/quota-service.js";
 import { callOrchestrator } from "../services/orchestrator-client.js";
 import { latestBundleArtifact, bundleArtifactForBuild } from "../services/build-service.js";
+import { reserveKeyMinutes } from "../services/api-key-budget.js";
 import { decryptEnvVars, projectEnvKey } from "../utils/env-crypto.js";
 import { isAgentStoreUrl } from "../utils/agent-store.js";
 import { isGithubArtifactUrl } from "../services/bundle-delivery.js";
@@ -86,7 +87,7 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
     return userId;
   }
 
-  app.post("/runtimes", async (req, reply) => {
+  app.post("/runtimes", { preHandler: requireScope("runtimes:write") }, async (req, reply) => {
     const parsed = startSchema.safeParse(req.body);
     if (!parsed.success) {
       return reply.status(400).send({
@@ -259,6 +260,26 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
         logger.warn({ err, projectId }, "Bundle lookup failed; using source archive");
       }
 
+      // A key with a budget may only reserve so many runtime minutes. The
+      // check happens before the start, so a key that is out of budget never
+      // reaches an agent.
+      const budget = req.auth!.budgetMinutes;
+      if (budget !== null) {
+        const reserved = req.auth!.reservedMinutes;
+        const granted = Math.min(
+          req.auth!.plan.max_runtime_hours * 60,
+          Math.max(0, budget - reserved)
+        );
+        if (granted <= 0) {
+          return reply.status(402).send({
+            error: {
+              code: "KEY_BUDGET_EXCEEDED",
+              message: `This key has used its budget of ${budget} runtime minutes.`,
+            },
+          });
+        }
+      }
+
       const result = await callOrchestrator<{ runtime: unknown }>("/runtime/start", {
         user_id: userId,
         project_id: projectId,
@@ -288,6 +309,16 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
       // A successful start is activity: it holds the project's zip past the
       // retention sweeper. Best-effort and never fatal to the start itself.
       await touchProjectActivity(projectId);
+
+      // The key reserves what it was granted, so its budget is a cap on what
+      // it may start rather than a hope.
+      if (req.auth!.budgetMinutes !== null && req.auth!.apiKeyId) {
+        const runtime = result?.runtime as { max_session_seconds?: number } | undefined;
+        const seconds = Number(runtime?.max_session_seconds ?? 0);
+        if (seconds > 0) {
+          await reserveKeyMinutes(req.auth!.apiKeyId, seconds / 60);
+        }
+      }
 
       return reply.status(202).send(result);
     } catch (err) {
@@ -319,7 +350,7 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.get("/runtimes", async (req, reply) => {
+  app.get("/runtimes", { preHandler: requireScope("runtimes:read") }, async (req, reply) => {
     const listUserId = requireUserId(req, reply);
     if (!listUserId) return;
     try {
@@ -342,7 +373,7 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
   // Stops every runtime the caller owns. Listed first via the caller's own
   // user_id, so one account can never stop another's runtimes. Per-runtime
   // failures are reported, not thrown: a partial stop is still useful.
-  app.post("/runtimes/stop-all", async (req, reply) => {
+  app.post("/runtimes/stop-all", { preHandler: requireScope("runtimes:write") }, async (req, reply) => {
     const userId = requireUserId(req, reply);
     if (!userId) return;
     let ids: string[];
@@ -386,7 +417,7 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
     return reply.send({ stopped, failed });
   });
 
-  app.get("/runtimes/:id", async (req, reply) => {
+  app.get("/runtimes/:id", { preHandler: requireScope("runtimes:read") }, async (req, reply) => {
     const { id } = req.params as { id: string };
     try {
       const result = await callOrchestrator<unknown>("/runtime/status", {
@@ -408,7 +439,12 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
   const simpleActions = ["stop", "restart", "logs", "info", "health", "pause", "resume"] as const;
 
   for (const action of simpleActions) {
-    app.post(`/runtimes/:id/${action}`, async (req, reply) => {
+    // Stopping and restarting change the world; reading its output does not.
+    const scope =
+      action === "stop" || action === "restart" || action === "pause" || action === "resume"
+        ? "runtimes:write"
+        : "runtimes:read";
+    app.post(`/runtimes/:id/${action}`, { preHandler: requireScope(scope) }, async (req, reply) => {
       const { id } = req.params as { id: string };
       // start/stop/restart get one automatic retry on an unreachable
       // orchestrator; the rest (logs/info/health/pause/resume) surface it.
@@ -447,7 +483,10 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
   ] as const;
 
   for (const action of proxiedActions) {
-    app.post(`/runtimes/:id/${action}`, async (req, reply) => {
+    // exec runs commands inside the app: its own permission, because it is
+    // the one that reaches into the machine.
+    const scope = action === "exec" ? "runtimes:exec" : "runtimes:read";
+    app.post(`/runtimes/:id/${action}`, { preHandler: requireScope(scope) }, async (req, reply) => {
       const { id } = req.params as { id: string };
       try {
         const result = await callOrchestrator<unknown>(`/runtime/${action}`, {
@@ -479,7 +518,7 @@ export async function runtimeRoutes(app: FastifyInstance): Promise<void> {
     });
   }
 
-  app.get("/usage", async (req, reply) => {
+  app.get("/usage", { preHandler: requireScope("usage:read") }, async (req, reply) => {
     const plan = req.auth!.plan;
 
     // The orchestrator is asked first because it owns the runtime lifecycle and

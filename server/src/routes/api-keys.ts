@@ -3,8 +3,14 @@ import { z } from "zod";
 import { randomUUID } from "node:crypto";
 import { supabase } from "../db/index.js";
 import { generateApiKey } from "../utils/api-key.js";
-import { authenticateApiKey } from "../middleware/auth.js";
+import { authenticateApiKey, requireSession } from "../middleware/auth.js";
 import { isAdminUser } from "../services/admin.js";
+import {
+  ALL_SCOPES,
+  API_KEY_SCOPE_GROUPS,
+  parseScopes,
+  serializeScopes,
+} from "../services/api-key-scopes.js";
 import { logger } from "../utils/logger.js";
 
 /**
@@ -50,6 +56,11 @@ const expirySchema = z
 const createSchema = z.object({
   name: z.string().trim().min(1).max(64).default(""),
   expires: expirySchema,
+  // The permissions this key holds. Omitted means every permission, which is
+  // what the OAuth-issued keys already have.
+  scopes: z.array(z.enum(ALL_SCOPES)).max(ALL_SCOPES.length).optional(),
+  // The runtime minutes this key may reserve. Omitted means no cap.
+  budget_minutes: z.number().int().min(1).max(100000).optional(),
 });
 
 export function expiryToTimestamp(
@@ -68,21 +79,54 @@ export function expiryToTimestamp(
   return new Date(at).toISOString();
 }
 
+/** The shape a key row takes on the wire. */
+interface KeyView {
+  id: string;
+  key_prefix: string;
+  name: string;
+  is_active: boolean;
+  created_at: string;
+  last_used_at: string | null;
+  expires_at: string | null;
+  scopes: string[] | null;
+  budget_minutes: number | null;
+  reserved_minutes: number;
+}
+
+function keyView(row: Record<string, unknown>): KeyView {
+  return {
+    id: row.id as string,
+    key_prefix: row.key_prefix as string,
+    name: row.name as string,
+    is_active: Boolean(row.is_active),
+    created_at: row.created_at as string,
+    last_used_at: (row.last_used_at as string | null) ?? null,
+    expires_at: (row.expires_at as string | null) ?? null,
+    scopes: parseScopes(row.scopes as string | null),
+    budget_minutes: (row.budget_minutes as number | null) ?? null,
+    reserved_minutes: (row.reserved_minutes as number | null) ?? 0,
+  };
+}
+
+const KEY_COLUMNS =
+  "id, key_prefix, name, is_active, created_at, last_used_at, expires_at, scopes, budget_minutes, reserved_minutes";
+
 export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authenticateApiKey);
+  // Minting and revoking keys is a session-only operation: a key that could
+  // mint keys could mint itself one with every scope and no budget.
+  app.addHook("preHandler", requireSession);
 
-  // RETIRED (OAuth only): manual key listing retired with the API-keys page.
-  // The original body is preserved below so the flow can be restored; the
-  // /account/grants endpoints are the supported replacement for revocation.
+  // The permissions a key can be given. The dashboard renders this list, so
+  // the two can never drift apart.
+  app.get("/api-keys/scopes", async (_req, reply) => {
+    return reply.send({ scopes: API_KEY_SCOPE_GROUPS, all: ALL_SCOPES });
+  });
+
   app.get("/api-keys", async (req, reply) => {
-    void req;
-    return reply.status(410).send({
-      error: { code: "RETIRED", message: "Manual API keys are retired; connect with OAuth instead." },
-    });
-    /*
     const { data, error } = await supabase
       .from("api_keys")
-      .select("id, key_prefix, name, is_active, created_at, last_used_at, expires_at")
+      .select(KEY_COLUMNS)
       .eq("user_id", req.auth!.userId)
       .order("created_at", { ascending: false });
 
@@ -90,18 +134,10 @@ export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
       return reply.status(500).send({ error: { code: "INTERNAL_ERROR", message: "Failed to list keys" } });
     }
 
-    return reply.send({ api_keys: data });
-    */
+    return reply.send({ api_keys: ((data ?? []) as Record<string, unknown>[]).map(keyView) });
   });
 
-  // RETIRED (OAuth only): manual key creation retired; OAuth mints tokens.
-  // Preserved below for restoration.
   app.post("/api-keys", async (req, reply) => {
-    void req;
-    return reply.status(410).send({
-      error: { code: "RETIRED", message: "Manual API keys are retired; connect with OAuth instead." },
-    });
-    /*
     const parsed = createSchema.safeParse(req.body ?? {});
     if (!parsed.success) {
       return reply.status(400).send({
@@ -121,6 +157,8 @@ export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
       });
     }
 
+    const scopes = parsed.data.scopes ? serializeScopes(parsed.data.scopes) : null;
+
     const { error } = await supabase.from("api_keys").insert({
       id: randomUUID(),
       user_id: req.auth!.userId,
@@ -129,31 +167,32 @@ export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
       name,
       is_active: true,
       expires_at: expiresAt,
+      scopes,
+      budget_minutes: parsed.data.budget_minutes ?? null,
+      reserved_minutes: 0,
     });
 
     if (error) {
+      logger.error({ error, userId: req.auth!.userId }, "API key create failed");
       return reply.status(500).send({ error: { code: "INTERNAL_ERROR", message: "Failed to create key" } });
     }
 
-    logger.info({ userId: req.auth!.userId }, "API key created");
+    logger.info(
+      { userId: req.auth!.userId, name, scopes, budget: parsed.data.budget_minutes ?? null },
+      "API key created"
+    );
 
     return reply.status(201).send({
       api_key: key,
       key_prefix: prefix,
       name,
       expires_at: expiresAt,
+      scopes: parseScopes(scopes),
+      budget_minutes: parsed.data.budget_minutes ?? null,
     });
-    */
   });
 
-  // RETIRED (OAuth only): manual revocation retired; use Connected apps.
-  // Preserved below for restoration.
   app.post("/api-keys/:id/revoke", async (req, reply) => {
-    void req;
-    return reply.status(410).send({
-      error: { code: "RETIRED", message: "Manual API keys are retired; revoke from Connected apps instead." },
-    });
-    /*
     const { id } = req.params as { id: string };
 
     // Checked first so revoking a missing or already-deleted key 404s instead
@@ -186,17 +225,9 @@ export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
     // Saying so lets the UI sign out cleanly instead of failing its next load
     // with a bare 401 that looks like the revoke itself broke.
     return reply.send({ success: true, revoked_own_key: req.auth!.apiKeyId === id });
-    */
   });
 
-  // RETIRED (OAuth only): manual rotation retired; re-authorize instead.
-  // Preserved below for restoration.
   app.post("/api-keys/:id/rotate", async (req, reply) => {
-    void req;
-    return reply.status(410).send({
-      error: { code: "RETIRED", message: "Manual API keys are retired; re-authorize with OAuth instead." },
-    });
-    /*
     const { id } = req.params as { id: string };
 
     const { data: oldKey } = await supabase
@@ -231,6 +262,5 @@ export async function apiKeyRoutes(app: FastifyInstance): Promise<void> {
       key_prefix: prefix,
       rotated_own_key: req.auth!.apiKeyId === id,
     });
-    */
   });
 }

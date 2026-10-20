@@ -1,5 +1,5 @@
 import { FastifyInstance } from "fastify";
-import { authenticateApiKey } from "../middleware/auth.js";
+import { authenticateApiKey, requireScope } from "../middleware/auth.js";
 import { logger } from "../utils/logger.js";
 import { finalizeProjectUpload } from "../services/upload-finalize.js";
 import { paginateTable, parsePageParams } from "../utils/pagination.js";
@@ -9,7 +9,7 @@ const MAX_UPLOAD_BYTES = 400 * 1024 * 1024;
 export async function projectRoutes(app: FastifyInstance): Promise<void> {
   app.addHook("preHandler", authenticateApiKey);
 
-  app.post("/projects/upload", async (req, reply) => {
+  app.post("/projects/upload", { preHandler: requireScope("projects:write") }, async (req, reply) => {
     const parts = req.parts();
     let projectId: string | null = null;
     let projectName: string | null = null;
@@ -91,7 +91,7 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
     return reply.status(outcome.status).send(outcome.body);
   });
 
-  app.get("/projects", async (req, reply) => {
+  app.get("/projects", { preHandler: requireScope("projects:read") }, async (req, reply) => {
     // Paginated, but the `projects` key stays: the OpenCode plugin reads it,
     // and the plugin contract is frozen. New clients also get total/page/limit.
     const page = parsePageParams(req.query);

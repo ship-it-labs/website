@@ -204,7 +204,11 @@ export async function buildReportRoutes(app: FastifyInstance): Promise<void> {
     }
     const [, repo, runId] = match;
 
-    let artifacts: { archive_download_url: string; name: string }[];
+    let artifacts: {
+      archive_download_url: string;
+      name: string;
+      expired?: boolean;
+    }[];
     try {
       const gh = await fetch(
         `https://api.github.com/repos/${repo}/actions/runs/${runId}/artifacts`,
@@ -222,11 +226,20 @@ export async function buildReportRoutes(app: FastifyInstance): Promise<void> {
         });
       }
       const body = (await gh.json()) as {
-        artifacts?: { name: string; archive_download_url: string }[];
+        artifacts?: { name: string; archive_download_url: string; expired?: boolean }[];
       };
-      artifacts = (body.artifacts ?? []).filter(
-        (a: { name: string }) => a.name === `bundle-${id}.zip`
-      );
+      const all = body.artifacts ?? [];
+      // The exact name is the normal case. A run can hold more than one
+      // bundle-shaped artifact (a rebuild leaves the old one behind), so the
+      // fallback is "any bundle artifact", not "the first one we saw".
+      const exact = all.filter((a) => a.name === `bundle-${id}.zip`);
+      artifacts = exact.length > 0 ? exact : all.filter((a) => a.name.startsWith("bundle-"));
+      if (exact.length === 0 && artifacts.length > 0) {
+        logger.warn(
+          { buildId: id, found: artifacts.map((a) => a.name) },
+          "Bundle artifact name did not match the build id; using the run's bundle artifact"
+        );
+      }
     } catch (err) {
       logger.error({ err, buildId: id }, "GitHub artifact list failed");
       return reply.status(502).send({
@@ -238,6 +251,20 @@ export async function buildReportRoutes(app: FastifyInstance): Promise<void> {
     if (!artifact) {
       return reply.status(404).send({
         error: { code: "BUNDLE_NOT_FOUND", message: "Bundle artifact not found in GitHub Actions" },
+      });
+    }
+
+    // GitHub keeps expired artifacts in the listing but their download URL
+    // answers 404. Saying so plainly beats a bare "not found": the fix is to
+    // rebuild, and the agent has to be able to read that.
+    if (artifact.expired) {
+      logger.warn({ buildId: id, artifact: artifact.name }, "Bundle artifact has expired");
+      return reply.status(410).send({
+        error: {
+          code: "BUNDLE_EXPIRED",
+          message:
+            "This build's bundle has expired (GitHub keeps artifacts for seven days). Rebuild the project to run it.",
+        },
       });
     }
 

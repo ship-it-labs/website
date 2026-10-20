@@ -6,9 +6,7 @@ import { LoginPage } from "@/pages/login";
 import { SignupPage } from "@/pages/signup";
 import { OAuthAuthorizePage } from "@/pages/oauth-authorize";
 import { DashboardPage } from "@/pages/dashboard";
-// RETIRED (OAuth only): manual API-keys page retired; Connected apps in
-// Settings is the replacement. Import kept commented so the page survives.
-// import { ApiKeysPage } from "@/pages/api-keys";
+import { ApiKeysPage } from "@/pages/api-keys";
 import { BillingPage } from "@/pages/billing";
 import { SettingsPage } from "@/pages/settings";
 import { PrivacyPage } from "@/pages/privacy";
@@ -68,8 +66,8 @@ export function App() {
           </Protected>
         }
       />
-      {/* RETIRED (OAuth only): the API-keys page is retired; the route
-          below is preserved in comments with the page itself.
+      {/* API keys: mint a key with a name, a deadline, permissions and a
+          budget, so a tool gets exactly the access it needs. */}
       <Route
         path="/dashboard/keys"
         element={
@@ -78,7 +76,6 @@ export function App() {
           </Protected>
         }
       />
-      */}
       <Route
         path="/dashboard/billing"
         element={

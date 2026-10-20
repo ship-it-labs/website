@@ -11,6 +11,20 @@ import {
   EmptyState,
 } from "@/components/site/DashboardLayout";
 
+/**
+ * Minting a key.
+ *
+ * A key is a credential pasted into somebody else's tool, so it should be
+ * able to do less than the account that made it. This page therefore asks
+ * three things of every key: what it is called (so it can be recognised
+ * later), when it dies, and what it may do. The budget is the fourth: a cap
+ * on the runtime minutes the key may reserve, for the case where a runaway
+ * agent keeps starting runtimes.
+ *
+ * The OpenCode plugin does not need any of this: it signs in with OAuth and
+ * gets a full-power key of its own.
+ */
+
 interface ApiKeyRecord {
   id: string;
   key_prefix: string;
@@ -19,6 +33,14 @@ interface ApiKeyRecord {
   created_at: string;
   last_used_at: string | null;
   expires_at: string | null;
+  scopes: string[] | null;
+  budget_minutes: number | null;
+  reserved_minutes: number;
+}
+
+interface ScopeGroup {
+  group: string;
+  scopes: Array<{ id: string; label: string; description: string }>;
 }
 
 const EXPIRY_PRESETS = [
@@ -27,6 +49,14 @@ const EXPIRY_PRESETS = [
   { label: "30 days", days: 30 },
   { label: "90 days", days: 90 },
   { label: "1 year", days: 365 },
+];
+
+const BUDGET_PRESETS = [
+  { label: "No limit", hours: 0 },
+  { label: "1 hour", hours: 1 },
+  { label: "10 hours", hours: 10 },
+  { label: "50 hours", hours: 50 },
+  { label: "250 hours", hours: 250 },
 ];
 
 function expiryLabel(expiresAt: string | null, isActive: boolean): string {
@@ -42,11 +72,26 @@ function expiryLabel(expiresAt: string | null, isActive: boolean): string {
     : `expires in ${days} days (${new Date(expiresAt).toLocaleDateString()})`;
 }
 
+function budgetLabel(key: ApiKeyRecord): string {
+  if (key.budget_minutes === null) return "no budget limit";
+  const used = key.reserved_minutes;
+  const total = key.budget_minutes;
+  if (used >= total) return `budget used (${Math.round(used)} of ${total} min)`;
+  return `${Math.round(used)} of ${total} min used`;
+}
+
+function scopeSummary(scopes: string[] | null): string {
+  if (scopes === null) return "full access";
+  if (scopes.length === 0) return "no permissions";
+  return scopes.join(", ");
+}
+
 export function ApiKeysPage() {
   usePageTitle("API keys");
   const navigate = useNavigate();
   const { signOut } = useAuth();
   const [keys, setKeys] = useState<ApiKeyRecord[]>([]);
+  const [groups, setGroups] = useState<ScopeGroup[]>([]);
   const [revealed, setRevealed] = useState<string | null>(
     () => localStorage.getItem("shipit.initial_api_key")
   );
@@ -55,10 +100,13 @@ export function ApiKeysPage() {
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
 
-  // The create form. Collected up front so a key is born named and dated
-  // rather than as an anonymous immortal default.
+  // The create form. Collected up front so a key is born named, dated and
+  // limited rather than as an anonymous immortal default.
   const [keyName, setKeyName] = useState("");
-  const [expiryDays, setExpiryDays] = useState(0);
+  const [expiryDays, setExpiryDays] = useState(30);
+  const [budgetHours, setBudgetHours] = useState(0);
+  const [scopes, setScopes] = useState<string[] | null>(null);
+  const [scopesTouched, setScopesTouched] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -72,7 +120,21 @@ export function ApiKeysPage() {
 
   useEffect(() => {
     load();
+    api
+      .get<{ scopes: ScopeGroup[] }>("/api/v1/account/api-keys/scopes")
+      .then((result) => setGroups(result.scopes))
+      .catch(() => setGroups([]));
   }, [load]);
+
+  function toggleScope(id: string) {
+    setScopesTouched(true);
+    setScopes((current) => {
+      // Nothing picked yet means "everything", so the first click starts from
+      // the full list and narrows it.
+      const base = current ?? groups.flatMap((group) => group.scopes.map((s) => s.id));
+      return base.includes(id) ? base.filter((scope) => scope !== id) : [...base, id];
+    });
+  }
 
   async function create() {
     if (!keyName.trim()) {
@@ -91,11 +153,16 @@ export function ApiKeysPage() {
         // Omitting expiry entirely is what "never" means to the API; sending
         // expires_in_days: 0 would fail validation.
         ...(expiryDays > 0 ? { expires: { expires_in_days: expiryDays } } : {}),
+        ...(scopesTouched && scopes ? { scopes } : {}),
+        ...(budgetHours > 0 ? { budget_minutes: budgetHours * 60 } : {}),
       });
       setRevealed(result.api_key);
       localStorage.setItem("shipit.initial_api_key", result.api_key);
       setKeyName("");
-      setExpiryDays(0);
+      setExpiryDays(30);
+      setBudgetHours(0);
+      setScopes(null);
+      setScopesTouched(false);
       await load();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not create the key");
@@ -155,40 +222,111 @@ export function ApiKeysPage() {
   return (
     <DashboardLayout
       title="API keys"
-      subtitle="The plugin authenticates with one of these. Show a key once, then lose it forever."
+      subtitle="Give a tool exactly the access it needs: a name, a deadline, permissions and a budget. The key is shown once."
     >
       <Panel title="Create a key" className="mb-8">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-end">
-          <label className="flex-1">
-            <span className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">
-              Key name
-            </span>
-            <input
-              type="text"
-              value={keyName}
-              onChange={(event) => setKeyName(event.target.value)}
-              placeholder="e.g. laptop plugin"
-              maxLength={64}
-              autoComplete="off"
-              className="w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none"
-            />
-          </label>
-          <label>
-            <span className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">
-              Expires
-            </span>
-            <select
-              value={expiryDays}
-              onChange={(event) => setExpiryDays(Number(event.target.value))}
-              className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-zinc-200 focus:border-violet-500/60 focus:outline-none [&>option]:bg-zinc-900"
-            >
-              {EXPIRY_PRESETS.map((preset) => (
-                <option key={preset.label} value={preset.days}>
-                  {preset.label}
-                </option>
+        <div className="space-y-5">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-end">
+            <label className="flex-1">
+              <span className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">
+                Key name
+              </span>
+              <input
+                type="text"
+                value={keyName}
+                onChange={(event) => setKeyName(event.target.value)}
+                placeholder="e.g. laptop agent"
+                maxLength={64}
+                autoComplete="off"
+                className="w-full rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-zinc-200 placeholder:text-zinc-600 focus:border-violet-500/60 focus:outline-none"
+              />
+            </label>
+            <label>
+              <span className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">
+                Expires
+              </span>
+              <select
+                value={expiryDays}
+                onChange={(event) => setExpiryDays(Number(event.target.value))}
+                className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-zinc-200 focus:border-violet-500/60 focus:outline-none [&>option]:bg-zinc-900"
+              >
+                {EXPIRY_PRESETS.map((preset) => (
+                  <option key={preset.label} value={preset.days}>
+                    {preset.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span className="mb-1.5 block text-xs font-medium uppercase tracking-wide text-zinc-500">
+                Runtime budget
+              </span>
+              <select
+                value={budgetHours}
+                onChange={(event) => setBudgetHours(Number(event.target.value))}
+                className="rounded-lg border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-zinc-200 focus:border-violet-500/60 focus:outline-none [&>option]:bg-zinc-900"
+              >
+                {BUDGET_PRESETS.map((preset) => (
+                  <option key={preset.label} value={preset.hours}>
+                    {preset.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+
+          <div>
+            <div className="flex items-baseline justify-between gap-3">
+              <span className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+                Permissions
+              </span>
+              <span className="text-xs text-zinc-600">
+                {scopes === null
+                  ? "Everything"
+                  : scopes.length === 0
+                    ? "Nothing"
+                    : `${scopes.length} selected`}
+              </span>
+            </div>
+            <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+              {groups.map((group) => (
+                <div key={group.group} className="rounded-xl border border-white/10 bg-white/[0.02] p-3">
+                  <p className="text-xs font-medium uppercase tracking-widest text-violet-300/80">
+                    {group.group}
+                  </p>
+                  <div className="mt-2 space-y-2">
+                    {group.scopes.map((scope) => {
+                      const enabled = scopes === null || scopes.includes(scope.id);
+                      return (
+                        <label
+                          key={scope.id}
+                          className="flex cursor-pointer items-start gap-2 text-sm text-zinc-300"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={enabled}
+                            onChange={() => toggleScope(scope.id)}
+                            className="mt-0.5 h-3.5 w-3.5 shrink-0 accent-violet-500"
+                          />
+                          <span>
+                            <span className="text-zinc-200">{scope.label}</span>
+                            <span className="block text-[11px] leading-snug text-zinc-500">
+                              {scope.description}
+                            </span>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
               ))}
-            </select>
-          </label>
+            </div>
+            <p className="mt-2 text-xs text-zinc-600">
+              Leave everything ticked for full access. A key with no permissions can still
+              sign in, but it cannot do anything.
+            </p>
+          </div>
+
           <button
             type="button"
             onClick={create}
@@ -240,7 +378,7 @@ export function ApiKeysPage() {
 
       <Panel title="Keys">
         {keys.length === 0 ? (
-          <EmptyState>No keys yet. Create one to give the plugin access.</EmptyState>
+          <EmptyState>No keys yet. Create one to give a tool access.</EmptyState>
         ) : (
           <ul className="divide-y divide-white/[0.06]">
             {keys.map((k) => {
@@ -250,7 +388,7 @@ export function ApiKeysPage() {
               const working = busyKey === k.id;
               // A key dying within the week gets an amber deadline rather than
               // the same grey text as one living for a year — expired keys
-              // break the plugin at the worst moment, silently, at 3am.
+              // break the tool at the worst moment, silently, at 3am.
               const remainingMs = k.expires_at
                 ? new Date(k.expires_at).getTime() - Date.now()
                 : null;
@@ -285,6 +423,10 @@ export function ApiKeysPage() {
                       ) : (
                         expiryLabel(k.expires_at, k.is_active)
                       )}
+                      {" · "}
+                      {scopeSummary(k.scopes)}
+                      {" · "}
+                      {budgetLabel(k)}
                       {" · "}
                       last used {k.last_used_at ? new Date(k.last_used_at).toLocaleString() : "never"}
                     </p>

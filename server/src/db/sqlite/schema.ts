@@ -45,6 +45,11 @@ const ADDED_COLUMNS: { table: string; column: string; definition: string }[] = [
   // Storage-retention activity stamp (see 0028). Nullable so pre-migration
   // rows read as ancient and drain out on the first sweep; new writes stamp.
   { table: "projects", column: "last_activity_at", definition: "text" },
+  // Key permissions and budget (see 0029). NULL scopes mean every permission,
+  // which is what the keys minted before this existed already have.
+  { table: "api_keys", column: "scopes", definition: "text" },
+  { table: "api_keys", column: "budget_minutes", definition: "integer" },
+  { table: "api_keys", column: "reserved_minutes", definition: "integer not null default 0" },
 ];
 
 /** Columns removed from the schema, dropped from existing databases. */
@@ -150,7 +155,10 @@ create table if not exists api_keys (
   is_active integer not null default 1,
   created_at text not null default (datetime('now')),
   last_used_at text,
-  expires_at text
+  expires_at text,
+  scopes text,
+  budget_minutes integer,
+  reserved_minutes integer not null default 0
 );
 create index if not exists idx_api_keys_user on api_keys(user_id);
 create index if not exists idx_api_keys_hash on api_keys(key_hash);

@@ -122,6 +122,17 @@ export class SqliteClient {
           break;
         }
 
+        case "increment_api_key_reservation": {
+          this.db
+            .prepare(
+              `update api_keys
+                  set reserved_minutes = coalesce(reserved_minutes, 0) + ?
+                where id = ?`
+            )
+            .run(Number(params.p_minutes ?? 0), String(params.p_api_key_id));
+          break;
+        }
+
         default:
           return { data: null, error: { message: `Unknown rpc: ${name}` } };
       }

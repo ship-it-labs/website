@@ -3,6 +3,7 @@ import { supabase } from "../db/index.js";
 import { hashApiKey } from "../utils/api-key.js";
 import { hasSessionRow } from "../services/sessions.js";
 import { ensureDefaultPlan, defaultPlan } from "../services/plan-service.js";
+import { hasScope, parseScopes } from "../services/api-key-scopes.js";
 import type { Plan, AuthenticatedRequest } from "../types/index.js";
 import { logger } from "../utils/logger.js";
 
@@ -14,6 +15,15 @@ declare module "fastify" {
 
 function isApiKey(token: string): boolean {
   return token.startsWith("ox_live_") || token.startsWith("ox_test_");
+}
+
+/** The parts of an API key row the middleware cares about. */
+interface KeyRow {
+  id: string;
+  user_id: string;
+  scopes?: string | null;
+  budget_minutes?: number | null;
+  reserved_minutes?: number | null;
 }
 
 /**
@@ -29,11 +39,11 @@ function isApiKey(token: string): boolean {
  */
 async function resolveUserId(
   token: string
-): Promise<{ userId: string; apiKeyId: string } | null> {
+): Promise<{ userId: string; apiKeyId: string; key: KeyRow | null } | null> {
   if (isApiKey(token)) {
     const { data } = await supabase
       .from("api_keys")
-      .select("id, user_id, is_active, expires_at")
+      .select("id, user_id, is_active, expires_at, scopes, budget_minutes, reserved_minutes")
       .eq("key_hash", hashApiKey(token))
       .single();
 
@@ -45,7 +55,7 @@ async function resolveUserId(
       return null;
     }
 
-    return { userId: data.user_id as string, apiKeyId: data.id as string };
+    return { userId: data.user_id as string, apiKeyId: data.id as string, key: data as KeyRow };
   }
 
   // Session token. The local SQLite driver resolves its own opaque tokens; in
@@ -55,7 +65,7 @@ async function resolveUserId(
   // credentials" no matter how correctly the user logged in.
   const local = supabase as { getUserIdForToken?: (token: string) => string | null };
   const localUserId = local.getUserIdForToken?.(token) ?? null;
-  if (localUserId) return { userId: localUserId, apiKeyId: "" };
+  if (localUserId) return { userId: localUserId, apiKeyId: "", key: null };
 
   const auth = supabase.auth as unknown as {
     getUser?: (token: string) => Promise<{ data: { user: { id: string } | null } }>;
@@ -65,7 +75,7 @@ async function resolveUserId(
   try {
     const { data } = await auth.getUser(token);
     const id = data?.user?.id;
-    return id ? { userId: id, apiKeyId: "" } : null;
+    return id ? { userId: id, apiKeyId: "", key: null } : null;
   } catch {
     return null;
   }
@@ -189,7 +199,20 @@ async function resolveAuth(token: string): Promise<AuthOutcome> {
       .eq("key_hash", hashApiKey(token));
   }
 
-  return { ok: true, auth: { userId: user.id, plan: plan as Plan, apiKeyId: resolved.apiKeyId } };
+  // A key may be limited; the browser session behind the dashboard never is.
+  const key = resolved.key;
+  return {
+    ok: true,
+    auth: {
+      userId: user.id,
+      plan: plan as Plan,
+      apiKeyId: resolved.apiKeyId,
+      isApiKey: Boolean(key),
+      scopes: key ? parseScopes(key.scopes) : null,
+      budgetMinutes: key?.budget_minutes ?? null,
+      reservedMinutes: key?.reserved_minutes ?? 0,
+    },
+  };
 }
 
 export async function authenticateApiKey(
@@ -218,6 +241,48 @@ export async function authenticateApiKey(
 
   req.auth = outcome.auth;
   logger.debug({ userId: outcome.auth.userId }, "Request authenticated");
+}
+
+/**
+ * Requires a signed-in browser session, not an API key.
+ *
+ * Key management is how you hand out power, so it must not be reachable with
+ * the power itself: a key that could mint keys could mint itself a
+ * key with every scope and no budget.
+ */
+export async function requireSession(
+  req: FastifyRequest,
+  reply: FastifyReply
+): Promise<void> {
+  if (!req.auth?.isApiKey) return;
+  reply.status(403).send({
+    error: {
+      code: "SESSION_REQUIRED",
+      message: "Manage API keys from a signed-in session, not with an API key.",
+    },
+  });
+}
+
+/**
+ * Requires a permission from an API key.
+ *
+ * A browser session is the account holder and is never limited, so this only
+ * ever refuses a key that was created without the permission. Refusing with a
+ * 403 and naming the missing scope is the point: a key with a narrow budget
+ * should fail with "it may not do that", not with a shape it can read.
+ */
+export function requireScope(scope: string) {
+  return async (req: FastifyRequest, reply: FastifyReply): Promise<void> => {
+    const auth = req.auth;
+    if (!auth || !auth.isApiKey) return;
+    if (hasScope(auth.scopes, scope)) return;
+    reply.status(403).send({
+      error: {
+        code: "INSUFFICIENT_SCOPE",
+        message: `This key does not have the ${scope} permission.`,
+      },
+    });
+  };
 }
 
 /**
