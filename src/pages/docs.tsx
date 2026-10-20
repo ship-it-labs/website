@@ -4,6 +4,7 @@ import { SiteFooter } from "@/components/site/SiteFooter";
 import { AuroraBackground } from "@/components/site/AuroraBackground";
 import { Reveal } from "@/components/site/Reveal";
 import { CopyButton } from "@/components/site/CopyButton";
+import { ConnectTabs } from "@/components/site/ConnectTabs";
 import { usePageTitle } from "@/lib/page-title";
 import { cn } from "@/lib/utils";
 
@@ -13,20 +14,28 @@ interface Section {
   body: string[];
   code?: string;
   extra?: Array<[label: string, value: string]>;
+  /** Renders the client tab strip instead of a code block. */
+  render?: "connect";
 }
 
 const SECTIONS: Section[] = [
   {
     id: "connect",
-    title: "Connect OpenCode",
+    title: "Connect your AI assistant",
     body: [
-      "There is exactly one way to connect: run the login command. It opens a browser page where you approve, stores the access token for you, and adds the plugin to your OpenCode config — then restart OpenCode so every tool picks it up.",
-      "The login starts a temporary server on your own machine, opens the Ship-It authorize page, and on approval exchanges a one-time code plus a PKCE proof for an access token. Nothing secret ever passes through the chat. You can revoke access any time from Settings → Connected apps.",
+      "Ship-It speaks the Model Context Protocol, so one server works with Claude, Codex, Cursor, VS Code, Windsurf and anything else that speaks MCP. Paste the snippet for your client, then ask your agent to log in: it calls the login tool, which opens a Ship-It page where you approve the connection.",
+      "The OpenCode plugin is deprecated and no longer receives updates. It still works, and it is still the shortest way to connect OpenCode itself: npx opencode-shipit-runtime login. Everything new lands in the MCP server.",
     ],
-    code: `npx opencode-shipit-runtime login`,
-    extra: [
-      ["config", `"plugin": ["opencode-shipit-runtime"]`],
+    render: "connect",
+  },
+  {
+    id: "mcp",
+    title: "The MCP server",
+    body: [
+      "The server is one URL: /mcp. It speaks JSON-RPC 2.0, and every tool it exposes runs as you — the same credential, the same plan limits, the same quota as any other client. There is no privileged path for AI clients.",
+      "The tools cover projects, builds, runtimes, usage and the documentation itself. The platform manual is also available as MCP resources, so a client can read the docs instead of guessing from tool names.",
     ],
+    code: `POST ${typeof window === "undefined" ? "" : window.location.origin}/mcp`,
   },
   {
     id: "build",
@@ -48,20 +57,32 @@ const SECTIONS: Section[] = [
     id: "quota",
     title: "Quotas and leases",
     body: [
-      "Quota is enforced on the server, never in the plugin. The maximum session length is the smallest of your plan limit, the three-hour hard cap, and the time you have left this month.",
-      "A user with thirty minutes remaining can start a thirty minute runtime. The server-agent enforces the lease independently, so a modified plugin cannot extend it.",
+      "Quota is enforced on the server, never in the client. The maximum session length is the smallest of your plan limit, the three-hour hard cap, and the time you have left this month.",
+      "A user with thirty minutes remaining can start a thirty minute runtime. The server-agent enforces the lease independently, so a modified client cannot extend it.",
     ],
   },
   {
     id: "tools",
     title: "Tools the agent can use",
     body: [
-      "Every tool is authorised against your plan on the server. Groups are build.*, runtime.*, fs.*, network.*, artifact.* and usage.*, plus shipit_login for connecting.",
+      "Every tool is authorised against your plan on the server. The MCP server exposes these groups:",
     ],
   },
 ];
 
-const TOOL_GROUPS = [
+const MCP_TOOL_GROUPS = [
+  { group: "auth", tools: ["login"] },
+  { group: "projects", tools: ["list_projects", "upload_project"] },
+  { group: "builds", tools: ["submit_build", "list_builds", "get_build", "get_build_logs"] },
+  {
+    group: "runtimes",
+    tools: ["start_runtime", "list_runtimes", "get_runtime", "stop_runtime", "runtime_logs", "exec_in_runtime"],
+  },
+  { group: "account", tools: ["get_usage", "get_account"] },
+  { group: "docs", tools: ["search_docs"] },
+];
+
+const PLUGIN_TOOL_GROUPS = [
   { group: "auth", tools: ["shipit_login"] },
   { group: "project", tools: ["project_upload"] },
   { group: "build.*", tools: ["build_submit", "build_status", "build_logs", "build_list"] },
@@ -147,6 +168,12 @@ export function DocsPage() {
                       </p>
                     ))}
 
+                    {section.render === "connect" && (
+                      <div className="mt-6">
+                        <ConnectTabs />
+                      </div>
+                    )}
+
                     {section.code && (
                       <pre className="glass mt-6 overflow-x-auto rounded-2xl p-5 text-[13px] leading-relaxed">
                         <code className="text-zinc-300">{section.code}</code>
@@ -170,17 +197,37 @@ export function DocsPage() {
                     )}
 
                     {section.id === "tools" && (
-                      <div className="mt-6 grid gap-3 sm:grid-cols-2">
-                        {TOOL_GROUPS.map((group) => (
-                          <div key={group.group} className="glass rounded-xl p-4">
-                            <p className="font-mono text-xs text-violet-300/90">
-                              {group.group}
-                            </p>
-                            <p className="mt-2 font-mono text-[12px] leading-relaxed text-zinc-500">
-                              {group.tools.join("  ")}
-                            </p>
+                      <div className="mt-6 space-y-8">
+                        <div>
+                          <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500">
+                            MCP server
+                          </p>
+                          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                            {MCP_TOOL_GROUPS.map((group) => (
+                              <div key={group.group} className="glass rounded-xl p-4">
+                                <p className="font-mono text-xs text-violet-300/90">{group.group}</p>
+                                <p className="mt-2 font-mono text-[12px] leading-relaxed text-zinc-500">
+                                  {group.tools.join("  ")}
+                                </p>
+                              </div>
+                            ))}
                           </div>
-                        ))}
+                        </div>
+                        <div>
+                          <p className="text-[11px] font-medium uppercase tracking-[0.14em] text-zinc-500">
+                            OpenCode plugin (deprecated)
+                          </p>
+                          <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                            {PLUGIN_TOOL_GROUPS.map((group) => (
+                              <div key={group.group} className="glass rounded-xl p-4">
+                                <p className="font-mono text-xs text-violet-300/90">{group.group}</p>
+                                <p className="mt-2 font-mono text-[12px] leading-relaxed text-zinc-500">
+                                  {group.tools.join("  ")}
+                                </p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
                       </div>
                     )}
                   </section>

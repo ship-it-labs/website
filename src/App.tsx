@@ -25,6 +25,7 @@ import { TermsPage } from "@/pages/terms";
 import { NotFoundPage } from "@/pages/not-found";
 import { RouteRoot } from "@/components/site/RouteErrorBoundary";
 import { AssistantWidget } from "@/components/site/AssistantWidget";
+import { ConnectPopup } from "@/components/site/ConnectPopup";
 
 function Protected({ children }: { children: ReactNode }) {
   const { user, loading } = useAuth();
@@ -121,6 +122,9 @@ export function Root() {
         {/* Outside RouteRoot so a page crash never takes the assistant with it,
             and inside AuthProvider so it can read the signed-in user. */}
         <AssistantWidget />
+        {/* The first-run popup: one look at the MCP server and the snippet
+            for your client, shown once per account. */}
+        <ConnectPopup />
       </AuthProvider>
     </BrowserRouter>
   );
