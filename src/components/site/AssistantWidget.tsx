@@ -26,7 +26,7 @@ import { cn } from "@/lib/utils";
 const EXAMPLES = [
   "What plan am I on and how much time is left?",
   "Why did my last build fail?",
-  "How do I deploy from OpenCode?",
+  "How do I connect my AI assistant?",
 ];
 
 function friendly(err: unknown): string {
@@ -130,19 +130,39 @@ export function AssistantWidget() {
     ]);
     setBusy(true);
     try {
-      const turn = await agentApi.send(clean, activeId);
-      setActiveId(turn.conversationId);
+      // The answer is streamed: an empty assistant bubble appears at once and
+      // fills as the words arrive, instead of the reader staring at a spinner
+      // for the whole answer.
+      const streamedId = newMessageId();
       setMessages((prev) => [
         ...prev,
         {
-          id: newMessageId(),
+          id: streamedId,
           role: "assistant",
-          content: turn.reply,
-          model: turn.model,
-          cacheHit: turn.cacheHit,
+          content: "",
+          model: null,
+          cacheHit: false,
           createdAt: new Date().toISOString(),
         },
       ]);
+
+      const turn = await agentApi.sendStream(clean, activeId, (fragment) => {
+        setMessages((prev) =>
+          prev.map((message) =>
+            message.id === streamedId
+              ? { ...message, content: message.content + fragment }
+              : message
+          )
+        );
+      });
+      setActiveId(turn.conversationId);
+      setMessages((prev) =>
+        prev.map((message) =>
+          message.id === streamedId
+            ? { ...message, content: turn.reply, model: turn.model, cacheHit: turn.cacheHit }
+            : message
+        )
+      );
       setCredits(turn.credits);
       void loadConversations();
     } catch (err) {

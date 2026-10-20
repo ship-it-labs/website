@@ -5,21 +5,18 @@ import { authenticateApiKey } from "../middleware/auth.js";
 import { checkRateLimit } from "../services/rate-limit.js";
 import {
   OAuthError,
-  OAUTH_APP_NAME,
   validateMcpRedirect,
-  validateRedirectUri,
   createAuthCode,
   exchangeCode,
 } from "../services/oauth.js";
-import { MCP_OAUTH_CLIENT_ID } from "../services/mcp-login.js";
 import { logger } from "../utils/logger.js";
 
 /**
- * OAuth 2.0 authorization-code + PKCE endpoints for the first-party OpenCode
- * plugin. The plugin opens the authorize page in the user's browser, the user
- * approves, the browser returns a one-time code to the plugin's loopback
- * server, and the plugin exchanges it for an access token (a regular account
- * API key under the hood).
+ * OAuth 2.0 authorization-code + PKCE endpoints for the MCP server. The
+ * client opens the authorize page in the user's browser, the user approves,
+ * the browser returns a one-time code to the platform's own callback, and the
+ * server exchanges it for an access token (a regular account API key under
+ * the hood).
  */
 
 function oauthError(reply: FastifyReply, err: unknown) {
@@ -86,10 +83,7 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
     // never via redirect, so a crafted URI cannot launder our messages.
     let redirect: string;
     try {
-      redirect =
-        body.client_id === MCP_OAUTH_CLIENT_ID
-          ? validateMcpRedirect(body.redirect_uri, body.state)
-          : validateRedirectUri(body.redirect_uri);
+      redirect = validateMcpRedirect(body.redirect_uri, body.state);
     } catch (err) {
       return oauthError(reply, err);
     }
@@ -109,7 +103,7 @@ export async function oauthRoutes(app: FastifyInstance): Promise<void> {
         codeChallenge: body.code_challenge,
         codeChallengeMethod: body.code_challenge_method,
       });
-      logger.info({ userId: req.auth!.userId, app: OAUTH_APP_NAME }, "OAuth authorization approved");
+      logger.info({ userId: req.auth!.userId, app: "Ship-It MCP" }, "OAuth authorization approved");
       return reply.send({
         redirect_to: redirectWith(redirect, { code, state: body.state }),
       });

@@ -257,10 +257,19 @@ async function callModel(
  * answers with real content. Throws AgentUnavailableError when every model
  * fails, carrying whether the cause was a credit shortfall so the caller can
  * tell the user something actionable.
+ *
+ * When `onDelta` is given, the answer is streamed: each fragment of text is
+ * handed over as it arrives, so the reader sees the reply being written
+ * rather than waiting for it. Tool calls are still collected, because a turn
+ * that ends in a tool call has to be replayed to the model.
  */
 export async function chatCompletion(
   messages: AgentMessage[],
-  options: { tools?: ToolDefinition[]; maxTokens?: number } = {}
+  options: {
+    tools?: ToolDefinition[];
+    maxTokens?: number;
+    onDelta?: (text: string) => void;
+  } = {}
 ): Promise<AgentReply> {
   if (!agentEnabled()) {
     throw new AgentUnavailableError("No Pollinations API key is configured.", false, 0);
@@ -270,9 +279,21 @@ export async function chatCompletion(
   const models = agentModels();
   const failures: string[] = [];
   let sawLowBalance = false;
+  let streamed = false;
+
+  // The wrapper is what knows whether text has reached the reader: once it
+  // has, a different model cannot take over the sentence.
+  const onDelta = options.onDelta
+    ? (text: string) => {
+        streamed = true;
+        options.onDelta?.(text);
+      }
+    : undefined;
 
   for (const model of models) {
-    const attempt = await callModel(model, messages, tools, options.maxTokens);
+    const attempt = onDelta
+      ? await callModelStreaming(model, messages, tools, options.maxTokens, onDelta)
+      : await callModel(model, messages, tools, options.maxTokens);
     if (attempt.ok) {
       if (failures.length > 0) {
         logger.info({ model, failures }, "Pollinations answered after fallback");
@@ -280,6 +301,15 @@ export async function chatCompletion(
       return attempt.reply;
     }
 
+    // Once text has reached the reader, a different model cannot take over
+    // the sentence: the fallback only applies to a turn that produced nothing.
+    if (streamed) {
+      throw new AgentUnavailableError(
+        `The answer was cut short: ${attempt.message}`,
+        attempt.kind === "low_balance",
+        attemptsCount(models)
+      );
+    }
     if (attempt.kind === "low_balance") sawLowBalance = true;
     failures.push(`${model}: ${attempt.message}`);
     logger.warn(
@@ -293,6 +323,156 @@ export async function chatCompletion(
     sawLowBalance,
     attemptsCount(models)
   );
+}
+
+/**
+ * The streaming half of a chat completion.
+ *
+ * The wire format is the OpenAI one: `data:` lines carrying a delta, then
+ * `[DONE]`. Tool calls arrive fragmented across deltas (the name once, the
+ * arguments in pieces), so they are accumulated per index and handed back
+ * whole — the tool loop replays them to the model, which needs them intact.
+ */
+async function callModelStreaming(
+  model: string,
+  messages: AgentMessage[],
+  tools: ToolDefinition[],
+  maxTokens: number | undefined,
+  onDelta: (text: string) => void
+): Promise<Attempt> {
+  const body: Record<string, unknown> = {
+    model,
+    messages: toWire(messages, CACHEABLE.test(model)),
+    stream: true,
+    stream_options: { include_usage: true },
+  };
+  if (tools.length > 0) {
+    body.tools = tools;
+    body.tool_choice = "auto";
+  }
+  if (maxTokens && maxTokens > 0) body.max_tokens = maxTokens;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const response = await fetch(`${BASE_URL}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+        ...(API_KEY ? { Authorization: `Bearer ${API_KEY}` } : {}),
+      },
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const raw = await response.text();
+      const data = raw ? safeJson(raw) : null;
+      return {
+        ok: false,
+        kind: "http",
+        status: response.status,
+        message: errorText(data, raw.slice(0, 300) || `HTTP ${response.status}`),
+      };
+    }
+    if (!response.body) {
+      return { ok: false, kind: "empty", status: 200, message: "Model returned no stream" };
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const toolCalls = new Map<number, { id: string; name: string; args: string }>();
+    let text = "";
+    let buffer = "";
+    let usage: Record<string, unknown> = {};
+    let finishReason: string | null = null;
+    let emitted = false;
+
+    const handle = (json: Record<string, unknown>) => {
+      const choices = json.choices;
+      const choice = Array.isArray(choices)
+        ? (choices[0] as Record<string, unknown>)
+        : null;
+      const delta = (choice?.delta ?? {}) as Record<string, unknown>;
+      if (typeof delta.content === "string" && delta.content.length > 0) {
+        text += delta.content;
+        emitted = true;
+        onDelta(delta.content);
+      }
+      if (Array.isArray(delta.tool_calls)) {
+        for (const raw of delta.tool_calls as Array<Record<string, unknown>>) {
+          const index = Number(raw.index ?? 0);
+          const acc = toolCalls.get(index) ?? { id: "", name: "", args: "" };
+          if (typeof raw.id === "string" && raw.id) acc.id = raw.id;
+          const fn = (raw.function ?? {}) as Record<string, unknown>;
+          if (typeof fn.name === "string" && fn.name) acc.name += fn.name;
+          if (typeof fn.arguments === "string") acc.args += fn.arguments;
+          toolCalls.set(index, acc);
+        }
+      }
+      if (typeof choice?.finish_reason === "string") finishReason = choice.finish_reason;
+      if (json.usage && typeof json.usage === "object") {
+        usage = json.usage as Record<string, unknown>;
+      }
+    };
+
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let split = buffer.indexOf("\n\n");
+      while (split >= 0) {
+        const chunk = buffer.slice(0, split);
+        buffer = buffer.slice(split + 2);
+        for (const line of chunk.split("\n")) {
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
+          const json = safeJson(data);
+          if (json) handle(json);
+        }
+        split = buffer.indexOf("\n\n");
+      }
+    }
+
+    const calls: AgentToolCall[] = [...toolCalls.entries()]
+      .sort((a, b) => a[0] - b[0])
+      .map(([index, acc]) => ({
+        id: acc.id || `call_${index}`,
+        type: "function" as const,
+        function: { name: acc.name, arguments: acc.args },
+      }));
+
+    if (!text && calls.length === 0) {
+      return { ok: false, kind: "empty", status: 200, message: "Model returned no content" };
+    }
+    if (calls.length === 0 && looksLowBalance(text)) {
+      return { ok: false, kind: "low_balance", status: 200, message: text.trim().slice(0, 200) };
+    }
+
+    const details = (usage.prompt_tokens_details ?? {}) as Record<string, unknown>;
+    return {
+      ok: true,
+      reply: {
+        text,
+        model,
+        toolCalls: calls,
+        usage: {
+          promptTokens: Number(usage.prompt_tokens ?? 0),
+          completionTokens: Number(usage.completion_tokens ?? 0),
+          totalTokens: Number(usage.total_tokens ?? 0),
+          cachedTokens: Number(details.cached_tokens ?? 0),
+        },
+        finishReason,
+      },
+    };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, kind: "network", status: 0, message };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function attemptsCount(models: string[]): number {

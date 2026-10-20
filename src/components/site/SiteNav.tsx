@@ -4,9 +4,16 @@ import { OfflineBanner } from "@/components/site/OfflineBanner";
 import { FeedbackButton } from "@/components/site/FeedbackButton";
 import { cn } from "@/lib/utils";
 
-const LINKS = [
+/**
+ * The manual is a separate static site built by Docusaurus and served by the
+ * same process. It therefore has to be a plain link: a client-side route
+ * would render the app's own 404 page instead of the manual.
+ */
+type NavLink = { label: string; to: string; href?: never } | { label: string; href: string; to?: never };
+
+const LINKS: NavLink[] = [
   { to: "/pricing", label: "Pricing" },
-  { to: "/docs", label: "Docs" },
+  { href: "/docs/", label: "Docs" },
   { to: "/faq", label: "FAQ" },
   { to: "/status", label: "Status" },
   { to: "/terms", label: "Terms" },
@@ -59,20 +66,23 @@ export function SiteNav() {
         </Link>
 
         <div className="hidden items-center gap-1 md:flex">
-          {LINKS.map((link) => (
-            <Link
-              key={link.to}
-              to={link.to}
-              className={cn(
-                "rounded-lg px-3 py-2 text-sm transition-colors duration-200",
-                location.pathname === link.to
-                  ? "bg-white/10 text-white"
-                  : "text-zinc-400 hover:text-white"
-              )}
-            >
-              {link.label}
-            </Link>
-          ))}
+          {LINKS.map((link) => {
+            const className = cn(
+              "rounded-lg px-3 py-2 text-sm transition-colors duration-200",
+              link.to && location.pathname === link.to
+                ? "bg-white/10 text-white"
+                : "text-zinc-400 hover:text-white"
+            );
+            return link.href ? (
+              <a key={link.href} href={link.href} className={className}>
+                {link.label}
+              </a>
+            ) : (
+              <Link key={link.to} to={link.to ?? "/"} className={className}>
+                {link.label}
+              </Link>
+            );
+          })}
         </div>
 
         <div className="hidden items-center gap-2 md:flex">
@@ -129,22 +139,34 @@ export function SiteNav() {
         )}
       >
         <div className="flex flex-col gap-1 p-3">
-          {LINKS.map((link, i) => (
-            <Link
-              key={link.to}
-              to={link.to}
-              style={{ transitionDelay: `${open ? i * 45 + 60 : 0}ms` }}
-              className={cn(
-                "rounded-xl px-4 py-3 text-sm transition-all duration-300",
-                open ? "translate-y-0 opacity-100" : "translate-y-1 opacity-0",
-                location.pathname === link.to
-                  ? "bg-white/10 text-white"
-                  : "text-zinc-300 hover:bg-white/5 hover:text-white"
-              )}
-            >
-              {link.label}
-            </Link>
-          ))}
+          {LINKS.map((link, i) => {
+            const className = cn(
+              "rounded-xl px-4 py-3 text-sm transition-all duration-300",
+              open ? "translate-y-0 opacity-100" : "translate-y-1 opacity-0",
+              link.to && location.pathname === link.to
+                ? "bg-white/10 text-white"
+                : "text-zinc-300 hover:bg-white/5 hover:text-white"
+            );
+            return link.href ? (
+              <a
+                key={link.href}
+                href={link.href}
+                style={{ transitionDelay: `${open ? i * 45 + 60 : 0}ms` }}
+                className={className}
+              >
+                {link.label}
+              </a>
+            ) : (
+              <Link
+                key={link.to}
+                to={link.to ?? "/"}
+                style={{ transitionDelay: `${open ? i * 45 + 60 : 0}ms` }}
+                className={className}
+              >
+                {link.label}
+              </Link>
+            );
+          })}
           <div className="mt-2 flex flex-col gap-2 border-t border-white/10 pt-3">
             <Link
               to="/login"

@@ -3,8 +3,8 @@
  *
  * Every modern MCP client keeps its server list in its own file, so the only
  * thing that differs between them is the shape of the config and where it
- * lives. The OpenCode plugin is deprecated but still works, so it keeps an
- * entry with the one command that sets it up.
+ * lives. The MCP server is the only integration surface: one server, one
+ * login, and the same tools for everybody.
  */
 
 export interface ConnectClient {
@@ -120,16 +120,5 @@ export const CONNECT_CLIENTS: ConnectClient[] = [
         null,
         2
       ),
-  },
-  {
-    id: "opencode",
-    name: "OpenCode",
-    location: "deprecated, but still works",
-    summary:
-      "The OpenCode plugin is deprecated and no longer receives updates. It still works, and it is still the shortest way to connect OpenCode itself.",
-    language: "shell",
-    snippet: () => "npx opencode-shipit-runtime login",
-    deprecated: true,
-    note: "Everything new lands in the MCP server, which every other client uses.",
   },
 ];

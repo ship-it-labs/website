@@ -9,13 +9,13 @@ const SECTIONS = [
     title: "Acceptance of these terms",
     body: [
       "By creating an account or using the Ship-It platform you agree to these terms. If you do not agree, do not use the platform.",
-      "These terms apply to the website, the OpenCode plugin, the control plane and any server-agent you operate on our behalf.",
+      "These terms apply to the website, the control plane, the MCP server and any server-agent you operate on our behalf.",
     ],
   },
   {
     title: "What the platform does",
     body: [
-      "Ship-It builds software you submit through the OpenCode plugin and runs the resulting artifact inside an ephemeral sandbox. Builds execute in GitHub Actions; runtimes execute in short-lived containers.",
+      "Ship-It builds software you submit through the MCP server and runs the resulting artifact inside an ephemeral sandbox. Builds execute in GitHub Actions; runtimes execute in short-lived containers.",
       "You keep ownership of the source you upload. We claim no rights over your code beyond what is needed to build and run it for you.",
     ],
   },

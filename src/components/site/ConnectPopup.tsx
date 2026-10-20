@@ -11,7 +11,9 @@ import { ConnectTabs } from "@/components/site/ConnectTabs";
  * here is the snippet for your client, and your agent will sign you in.
  *
  * It is deliberately not a wizard: one popup, one decision, and a link to the
- * documentation for anyone who wants the long version.
+ * documentation for anyone who wants the long version. "Do not show this
+ * again" is a first-class choice rather than a hidden flag — some people
+ * connect their client once and never want to be told about it again.
  */
 
 const SEEN_KEY = "shipit:connect-popup-seen";
@@ -51,7 +53,13 @@ export function ConnectPopup() {
 
   if (!open || !user) return null;
 
+  /** Dismissed for now: it will offer itself again next time. */
   function close() {
+    setOpen(false);
+  }
+
+  /** Never again: the choice is remembered for this account. */
+  function never() {
     if (user) remember(user.id);
     setOpen(false);
   }
@@ -89,13 +97,22 @@ export function ConnectPopup() {
           <ConnectTabs compact />
         </div>
 
-        <div className="mt-5 flex items-center justify-between gap-3">
-          <a
-            href="/docs"
-            className="text-xs text-zinc-500 transition-colors hover:text-zinc-300"
-          >
-            Read the documentation
-          </a>
+        <div className="mt-5 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-4">
+            <a
+              href="/docs/"
+              className="text-xs text-zinc-500 transition-colors hover:text-zinc-300"
+            >
+              Read the documentation
+            </a>
+            <button
+              type="button"
+              onClick={never}
+              className="text-xs text-zinc-600 transition-colors hover:text-zinc-400"
+            >
+              Do not show this again
+            </button>
+          </div>
           <button
             type="button"
             onClick={close}

@@ -17,7 +17,7 @@ build and test commands, and the platform enforces the rules.
 
 | Piece | What it does |
 | --- | --- |
-| **Your client** | Claude, Codex, Cursor, VS Code, Windsurf — anything that speaks MCP. The OpenCode plugin still works too. |
+| **Your client** | Claude, Codex, Cursor, VS Code, Windsurf — anything that speaks MCP. |
 | **The control plane** | This site. It stores your projects, dispatches builds, decides which agent runs what, and enforces your plan. |
 | **GitHub Actions** | Where builds run. The workflow is shipped with the platform; you never write it. |
 | **The server agent** | The host that runs your app inside a sandbox: no interpreter of its own, a bundle with everything your app needs. |

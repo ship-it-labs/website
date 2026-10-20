@@ -1,5 +1,12 @@
 import { Link } from "react-router-dom";
 
+/**
+ * The manual is a separate static site built by Docusaurus and served by the
+ * same process, so its links are plain anchors: a client-side route would
+ * render the app's own 404 page instead of the manual.
+ */
+type FooterLink = { label: string; to: string; href?: never } | { label: string; href: string; to?: never };
+
 export function SiteFooter() {
   return (
     <footer className="relative border-t border-white/[0.07] px-6 py-14">
@@ -17,14 +24,14 @@ export function SiteFooter() {
             title="Product"
             links={[
               { label: "Pricing", to: "/pricing" },
-              { label: "Docs", to: "/docs" },
+              { label: "Docs", href: "/docs/" },
               { label: "Dashboard", to: "/dashboard" },
             ]}
           />
           <FooterColumn
             title="Resources"
             links={[
-              { label: "Documentation", to: "/docs" },
+              { label: "Documentation", href: "/docs/" },
               { label: "FAQ", to: "/faq" },
               { label: "Changelog", to: "/changelog" },
               { label: "Status", to: "/status" },
@@ -37,8 +44,7 @@ export function SiteFooter() {
             title="Account"
             links={[
               { label: "Create account", to: "/signup" },
-              // RETIRED (OAuth only): manual API keys retired.
-              // { label: "API keys", to: "/dashboard/keys" },
+              { label: "API keys", to: "/dashboard/keys" },
               { label: "Billing", to: "/dashboard/billing" },
               { label: "Contact support", to: "/contact" },
             ]}
@@ -59,7 +65,7 @@ function FooterColumn({
   links,
 }: {
   title: string;
-  links: Array<{ label: string; to: string }>;
+  links: FooterLink[];
 }) {
   return (
     <div>
@@ -68,13 +74,22 @@ function FooterColumn({
       </p>
       <ul className="mt-4 space-y-2.5">
         {links.map((link) => (
-          <li key={link.to}>
-            <Link
-              to={link.to}
-              className="text-sm text-zinc-400 transition-colors duration-200 hover:text-white"
-            >
-              {link.label}
-            </Link>
+          <li key={link.href ?? link.to}>
+            {link.href ? (
+              <a
+                href={link.href}
+                className="text-sm text-zinc-400 transition-colors duration-200 hover:text-white"
+              >
+                {link.label}
+              </a>
+            ) : (
+              <Link
+                to={link.to ?? "/"}
+                className="text-sm text-zinc-400 transition-colors duration-200 hover:text-white"
+              >
+                {link.label}
+              </Link>
+            )}
           </li>
         ))}
       </ul>

@@ -18,7 +18,6 @@ import { ForgotPasswordPage, ResetPasswordPage } from "@/pages/password";
 import { AdminPage } from "@/pages/admin";
 import { HomePage } from "@/pages/home";
 import { PricingPage } from "@/pages/pricing";
-import { DocsPage } from "@/pages/docs";
 import { TermsPage } from "@/pages/terms";
 import { NotFoundPage } from "@/pages/not-found";
 import { RouteRoot } from "@/components/site/RouteErrorBoundary";
@@ -46,7 +45,6 @@ export function App() {
     <Routes>
       <Route path="/" element={<HomePage />} />
       <Route path="/pricing" element={<PricingPage />} />
-      <Route path="/docs" element={<DocsPage />} />
       <Route path="/terms" element={<TermsPage />} />
       <Route path="/login" element={<LoginPage />} />
       <Route path="/signup" element={<SignupPage />} />

@@ -28,7 +28,7 @@ interface KeyRow {
 
 /**
  * Resolves the user id for a bearer token. Two credential types are accepted:
- * a long-lived account API key, which the OpenCode plugin and MCP clients
+ * a long-lived account API key, which MCP clients
  * use, and a session token issued by login, which the dashboard uses. Both
  * end up on the same user row so the AI and the human see the same account
  * and quota.

@@ -21,7 +21,7 @@ import {
  * on the runtime minutes the key may reserve, for the case where a runaway
  * agent keeps starting runtimes.
  *
- * The OpenCode plugin does not need any of this: it signs in with OAuth and
+ * The MCP server does not need any of this: it signs in with OAuth and
  * gets a full-power key of its own.
  */
 

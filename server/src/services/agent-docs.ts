@@ -63,10 +63,10 @@ Cancelling keeps your plan until the end of the current period, then reverts to 
   },
   {
     id: "api-keys",
-    title: "API keys and the plugin",
-    body: `Create account API keys under Settings. A key starts with ox_live_ (production) or ox_test_ (development) and is shown once — store it safely. Keys can be given an expiry and can be rotated or revoked; revoking kills any session using that key.
+    title: "API keys and the MCP server",
+    body: `Create account API keys in the dashboard's API keys tab. A key starts with ox_live_ (production) or ox_test_ (development) and is shown once — store it safely. Every key can be given a name, an expiry, a set of permissions and a budget of runtime minutes, and can be rotated or revoked; revoking kills any session using that key.
 
-The OpenCode plugin (opencode-shipit-runtime) uses an account key to deploy from your editor. Point it at your key and it will upload, build and report status without leaving the terminal.`,
+The MCP server is how AI clients connect. Point a client at /mcp, then ask the agent to log in: it calls the login tool, which opens a page in your browser where you sign in and approve, and the agent receives an access token it keeps to itself. The server's tools cover projects, builds, runtimes, usage and this documentation, and every one of them runs with the caller's own permissions.`,
   },
   {
     id: "errors",

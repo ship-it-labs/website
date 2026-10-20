@@ -154,6 +154,81 @@ export async function agentRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
+  /**
+   * The streaming half of the assistant.
+   *
+   * Same work as `POST /agent/messages`, but the answer arrives as it is
+   * written: `delta` events carry the text, `done` carries the finished turn.
+   * The reader watches a sentence appear instead of staring at a spinner, and
+   * the reply is stored exactly as before.
+   */
+  app.post("/agent/messages/stream", async (req, reply) => {
+    const userId = await requireUser(req, reply);
+    if (!userId) return;
+
+    const parsed = z
+      .object({
+        message: z.string().trim().min(1).max(4000),
+        conversation_id: z.string().uuid().nullish(),
+      })
+      .safeParse(req.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({
+        error: { code: "VALIDATION_ERROR", message: "Message must be 1-4000 characters" },
+      });
+    }
+
+    const limit = checkRateLimit(`agent:user:${userId}`, MESSAGE_LIMIT, MESSAGE_WINDOW_MS);
+    if (!limit.allowed) {
+      return reply.status(429).send({
+        error: {
+          code: "RATE_LIMITED",
+          message: "You are asking faster than the assistant can answer. Wait a moment.",
+          retry_after_seconds: limit.retryAfterSeconds,
+        },
+      });
+    }
+
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no",
+    });
+
+    const send = (event: string, data: unknown) => {
+      if (reply.raw.writableEnded) return;
+      reply.raw.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    // A client that walks away must not leave the turn running forever.
+    const aborted = new AbortController();
+    req.raw.on("close", () => aborted.abort());
+
+    try {
+      const turn = await sendMessage(
+        userId,
+        parsed.data.conversation_id ?? null,
+        parsed.data.message,
+        (fragment) => send("delta", { text: fragment })
+      );
+      send("done", turn);
+    } catch (err) {
+      if (err instanceof AiQuotaError) {
+        send("error", { code: "AI_QUOTA_EXCEEDED", message: err.message });
+      } else if (err instanceof AgentUnavailableError) {
+        send("error", { code: "AGENT_UNAVAILABLE", message: err.message });
+      } else {
+        logger.error({ err, userId }, "Assistant stream failed");
+        send("error", { code: "INTERNAL_ERROR", message: "The assistant could not answer" });
+      }
+    } finally {
+      if (!reply.raw.writableEnded) {
+        reply.raw.end();
+      }
+    }
+  });
+
   app.post("/agent/report", async (req, reply) => {
     const userId = await requireUser(req, reply);
     if (!userId) return;

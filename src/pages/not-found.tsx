@@ -31,7 +31,7 @@ export function NotFoundPage() {
           </p>
           <div className="mt-9 flex flex-col items-center justify-center gap-3 sm:flex-row">
             <GlowCta to="/">Back home</GlowCta>
-            <GhostCta to="/docs">Read the docs</GhostCta>
+            <GhostCta href="/docs/">Read the docs</GhostCta>
           </div>
           <p className="mt-8 text-sm text-zinc-600">
             Signed in? Your{" "}

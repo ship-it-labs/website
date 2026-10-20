@@ -11,22 +11,19 @@ import {
 } from "@/components/site/AuthLayout";
 
 /**
- * OAuth consent screen for the first-party clients. Arrived at from the
- * client via the system browser with client_id, redirect_uri, state and a PKCE
- * challenge. If the visitor is not signed in, an inline login comes first; the
- * decision POST then approves or denies, and the server hands back the exact
- * URL to navigate to — the page never builds redirect URLs itself, because the
- * redirect target is untrusted input.
- *
- * Two clients exist: the OpenCode plugin (deprecated, still working) and the
- * MCP server. They get the same ceremony under different names.
+ * OAuth consent screen for the MCP server. Arrived at from the client via the
+ * system browser with client_id, redirect_uri, state and a PKCE challenge. If
+ * the visitor is not signed in, an inline login comes first; the decision POST
+ * then approves or denies, and the server hands back the exact URL to navigate
+ * to — the page never builds redirect URLs itself, because the redirect target
+ * is untrusted input.
  */
 export function OAuthAuthorizePage() {
   const [params] = useSearchParams();
   const { user, signIn, loading } = useAuth();
 
   const clientId = params.get("client_id") ?? "";
-  const appName = clientId === "mcp" ? "Ship-It MCP" : "OpenCode";
+  const appName = "Ship-It MCP";
 
   usePageTitle(`Authorize ${appName}`);
 

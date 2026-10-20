@@ -102,21 +102,12 @@ Works with Copilot's agent mode and any VS Code build that speaks MCP —
 }
 ```
 
-## OpenCode
-
-The OpenCode plugin is **deprecated**: it no longer receives updates, and
-everything new lands in the MCP server. It still works, and it is still the
-shortest way to connect OpenCode itself:
-
-```bash
-npx opencode-shipit-runtime login
-```
-
-That opens the authorize page, stores an access token for you and adds the
-plugin to your OpenCode config. Restart OpenCode afterwards so the tools
-register.
-
 ## Revoking access
 
 Every authorization is a key on your account, visible in **Settings →
 Connected apps**. Revoking one cuts it off immediately.
+
+You can also mint a key yourself in **Dashboard → API keys**, with a name, a
+deadline, permissions and a budget of runtime minutes. That is the route to
+take when a client cannot be given a header, or when you want the key to be
+able to do less than your account.

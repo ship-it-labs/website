@@ -15,7 +15,7 @@ import {
  *
  * Every tool is a thin adapter over the platform's own REST API, replayed
  * in-process through `app.inject`. That is deliberate: the REST contract is
- * what the dashboard, the (deprecated) OpenCode plugin and the API keys all
+ * what the dashboard and the API keys all
  * speak, so a second implementation of the same rules would be a second set of
  * bugs. Auth, validation, command guards, rate limits and quota accounting
  * therefore all apply to MCP calls exactly as they do to HTTP calls — there is

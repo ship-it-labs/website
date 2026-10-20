@@ -31,9 +31,12 @@ export function ContactPage() {
             FAQ
           </Link>{" "}
           covers quotas, sessions, builds and billing, the{" "}
-          <Link to="/docs" className="text-violet-300 transition-colors hover:text-violet-200">
+          <a
+            href="/docs/"
+            className="text-violet-300 transition-colors hover:text-violet-200"
+          >
             docs
-          </Link>{" "}
+          </a>{" "}
           cover setup and troubleshooting, and{" "}
           <Link to="/status" className="text-violet-300 transition-colors hover:text-violet-200">
             status

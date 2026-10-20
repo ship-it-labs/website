@@ -6,18 +6,19 @@ import crypto from "node:crypto";
 import { SqliteClient } from "../src/db/sqlite/client.js";
 import {
   OAuthError,
-  validateRedirectUri,
+  validateMcpRedirect,
   validateClientId,
   verifyPkce,
   createAuthCode,
   exchangeCode,
 } from "../src/services/oauth.js";
+import { createMcpLoginSession } from "../src/services/mcp-login.js";
 
 /**
- * The OAuth ceremony must fail closed at every step: bad redirects never get
- * a redirect response, codes are single-use, PKCE binds the code to the
- * requester, and expiry is enforced on read. Runs against a throwaway
- * database rather than the real one.
+ * The OAuth ceremony must fail closed at every step: a redirect that is not
+ * the callback this server issued never gets a redirect response, codes are
+ * single-use, PKCE binds the code to the requester, and expiry is enforced on
+ * read. Runs against a throwaway database rather than the real one.
  */
 
 let client: SqliteClient;
@@ -45,45 +46,44 @@ function pkcePair() {
   return { verifier, challenge };
 }
 
-const REDIRECT = "http://localhost:4567/callback";
-
-async function approvedCode(overrides: Record<string, unknown> = {}) {
-  const { challenge } = pkcePair();
-  const { code } = await createAuthCode(client, {
-    userId: USER,
-    clientId: "opencode",
-    redirectUri: REDIRECT,
-    state: "state-123",
-    codeChallenge: challenge,
-    codeChallengeMethod: "S256",
-    ...overrides,
-  });
-  return code;
+/** A live login session: the only redirect target the server will accept. */
+function session() {
+  return createMcpLoginSession().session;
 }
 
 describe("redirect validation", () => {
-  it("accepts loopback http(s) and strips query and fragment", () => {
-    expect(validateRedirectUri("http://localhost:4567/callback?x=1#y")).toBe(
-      "http://localhost:4567/callback"
-    );
-    expect(validateRedirectUri("http://127.0.0.1:9/cb")).toBe("http://127.0.0.1:9/cb");
-    expect(validateRedirectUri("https://localhost:4567/callback")).toBe("https://localhost:4567/callback");
+  it("accepts the callback it issued for a live session", () => {
+    const live = session();
+    expect(validateMcpRedirect(live.redirectUri, live.state)).toBe(live.redirectUri);
   });
 
-  it("rejects everything else", () => {
+  it("refuses a redirect that is not a known session", () => {
+    const live = session();
     for (const bad of [
       "https://evil.example.com/callback",
-      "http://localhost.evil.example.com/callback",
-      "http://127.0.0.1.evil.com/callback",
-      "ftp://localhost/callback",
-      "http://user:pass@localhost/callback",
+      "http://127.0.0.1:3000/mcp/login/callback/not-a-session",
       "not-a-url",
       "",
-      "http://10.0.0.1/callback",
-      "http://[::ffff:127.0.0.1]/callback",
     ]) {
-      expect(() => validateRedirectUri(bad), bad).toThrow(OAuthError);
+      expect(() => validateMcpRedirect(bad, live.state), bad).toThrow(OAuthError);
     }
+  });
+
+  it("refuses another session's callback: the state does not match", () => {
+    const mine = session();
+    const theirs = session();
+    // The callback itself is legitimate — it belongs to a live session — so
+    // the state is what refuses it.
+    expect(() => validateMcpRedirect(theirs.redirectUri, mine.state)).toThrow(
+      expect.objectContaining({ code: "INVALID_REQUEST" })
+    );
+  });
+
+  it("refuses a state that does not match the session", () => {
+    const live = session();
+    expect(() => validateMcpRedirect(live.redirectUri, "somebody-elses-state")).toThrow(
+      expect.objectContaining({ code: "INVALID_REQUEST" })
+    );
   });
 
   it("rejects unknown clients", () => {
@@ -93,7 +93,8 @@ describe("redirect validation", () => {
   });
 });
 
-describe("PKCE", () => {  it("accepts a matching pair", () => {
+describe("PKCE", () => {
+  it("accepts a matching pair", () => {
     const { verifier, challenge } = pkcePair();
     expect(() => verifyPkce(verifier, challenge)).not.toThrow();
   });
@@ -110,21 +111,21 @@ describe("PKCE", () => {  it("accepts a matching pair", () => {
 
 describe("code issue and exchange", () => {
   it("exchanges a fresh code for a working access token", async () => {
-    const { verifier, challenge } = pkcePair();
+    const live = session();
     const { code } = await createAuthCode(client, {
       userId: USER,
-      clientId: "opencode",
-      redirectUri: REDIRECT,
-      state: "s",
-      codeChallenge: challenge,
+      clientId: "mcp",
+      redirectUri: live.redirectUri,
+      state: live.state,
+      codeChallenge: live.challenge,
       codeChallengeMethod: "S256",
     });
 
     const { userId, accessToken } = await exchangeCode(client, {
       code,
-      clientId: "opencode",
-      redirectUri: REDIRECT,
-      codeVerifier: verifier,
+      clientId: "mcp",
+      redirectUri: live.redirectUri,
+      codeVerifier: live.verifier,
     });
 
     expect(userId).toBe(USER);
@@ -135,68 +136,103 @@ describe("code issue and exchange", () => {
     const { hashApiKey } = await import("../src/utils/api-key.js");
     const { data } = await client
       .from("api_keys")
-      .select("is_active")
+      .select("is_active, name")
       .eq("key_hash", hashApiKey(accessToken))
       .single();
     expect((data as { is_active: boolean | number } | null)?.is_active).toBeTruthy();
+    expect((data as { name: string } | null)?.name).toBe("MCP (OAuth)");
   });
 
   it("rejects replays: a code is single-use", async () => {
-    const { verifier, challenge } = pkcePair();
+    const live = session();
     const { code } = await createAuthCode(client, {
       userId: USER,
-      clientId: "opencode",
-      redirectUri: REDIRECT,
-      state: "s",
-      codeChallenge: challenge,
+      clientId: "mcp",
+      redirectUri: live.redirectUri,
+      state: live.state,
+      codeChallenge: live.challenge,
       codeChallengeMethod: "S256",
     });
 
-    await exchangeCode(client, { code, clientId: "opencode", redirectUri: REDIRECT, codeVerifier: verifier });
+    await exchangeCode(client, {
+      code,
+      clientId: "mcp",
+      redirectUri: live.redirectUri,
+      codeVerifier: live.verifier,
+    });
     await expect(
-      exchangeCode(client, { code, clientId: "opencode", redirectUri: REDIRECT, codeVerifier: verifier })
+      exchangeCode(client, {
+        code,
+        clientId: "mcp",
+        redirectUri: live.redirectUri,
+        codeVerifier: live.verifier,
+      })
     ).rejects.toMatchObject({ code: "INVALID_GRANT" });
   });
 
   it("rejects expired codes", async () => {
-    const { verifier, challenge } = pkcePair();
+    const live = session();
     const { code } = await createAuthCode(
       client,
       {
         userId: USER,
-        clientId: "opencode",
-        redirectUri: REDIRECT,
-        state: "s",
-        codeChallenge: challenge,
+        clientId: "mcp",
+        redirectUri: live.redirectUri,
+        state: live.state,
+        codeChallenge: live.challenge,
         codeChallengeMethod: "S256",
       },
       Date.now() - 11 * 60_000
     );
     await expect(
-      exchangeCode(client, { code, clientId: "opencode", redirectUri: REDIRECT, codeVerifier: verifier })
+      exchangeCode(client, {
+        code,
+        clientId: "mcp",
+        redirectUri: live.redirectUri,
+        codeVerifier: live.verifier,
+      })
     ).rejects.toMatchObject({ code: "INVALID_GRANT" });
   });
 
   it("rejects redirect mismatch and unknown codes", async () => {
-    const code = await approvedCode();
-    const { verifier } = pkcePair();
+    const live = session();
+    const other = session();
+    const { code } = await createAuthCode(client, {
+      userId: USER,
+      clientId: "mcp",
+      redirectUri: live.redirectUri,
+      state: live.state,
+      codeChallenge: live.challenge,
+      codeChallengeMethod: "S256",
+    });
+
     await expect(
-      exchangeCode(client, { code, clientId: "opencode", redirectUri: "http://localhost:9999/other", codeVerifier: verifier })
+      exchangeCode(client, {
+        code,
+        clientId: "mcp",
+        redirectUri: other.redirectUri,
+        codeVerifier: live.verifier,
+      })
     ).rejects.toMatchObject({ code: "INVALID_GRANT" });
     await expect(
-      exchangeCode(client, { code: "never-issued", clientId: "opencode", redirectUri: REDIRECT, codeVerifier: verifier })
+      exchangeCode(client, {
+        code: "never-issued",
+        clientId: "mcp",
+        redirectUri: live.redirectUri,
+        codeVerifier: live.verifier,
+      })
     ).rejects.toMatchObject({ code: "INVALID_GRANT" });
   });
 
   it("rejects non-S256 challenges at approval", async () => {
-    const { challenge } = pkcePair();
+    const live = session();
     await expect(
       createAuthCode(client, {
         userId: USER,
-        clientId: "opencode",
-        redirectUri: REDIRECT,
-        state: "s",
-        codeChallenge: challenge,
+        clientId: "mcp",
+        redirectUri: live.redirectUri,
+        state: live.state,
+        codeChallenge: live.challenge,
         codeChallengeMethod: "plain",
       })
     ).rejects.toMatchObject({ code: "INVALID_REQUEST" });
@@ -208,14 +244,14 @@ describe("code issue and exchange", () => {
         insert: async () => ({ error: { code: "42P01", message: 'relation "oauth_codes" does not exist' } }),
       }),
     };
-    const { challenge } = pkcePair();
+    const live = session();
     await expect(
       createAuthCode(stubDb as never, {
         userId: USER,
-        clientId: "opencode",
-        redirectUri: REDIRECT,
-        state: "s",
-        codeChallenge: challenge,
+        clientId: "mcp",
+        redirectUri: live.redirectUri,
+        state: live.state,
+        codeChallenge: live.challenge,
         codeChallengeMethod: "S256",
       })
     ).rejects.toMatchObject({ code: "SERVER_ERROR", message: expect.stringMatching(/migration/i) });
@@ -227,14 +263,14 @@ describe("code issue and exchange", () => {
         insert: async () => ({ error: { code: "42501", message: "new row violates row-level security policy" } }),
       }),
     };
-    const { challenge } = pkcePair();
+    const live = session();
     await expect(
       createAuthCode(stubDb as never, {
         userId: USER,
-        clientId: "opencode",
-        redirectUri: REDIRECT,
-        state: "s",
-        codeChallenge: challenge,
+        clientId: "mcp",
+        redirectUri: live.redirectUri,
+        state: live.state,
+        codeChallenge: live.challenge,
         codeChallengeMethod: "S256",
       })
     ).rejects.toMatchObject({ code: "SERVER_ERROR", message: expect.stringMatching(/row-level security/i) });

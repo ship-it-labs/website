@@ -249,11 +249,12 @@ interface ToolLoopResult {
 async function runToolLoop(
   messages: AgentMessage[],
   ctx: ToolContext,
-  maxTokens: number
+  maxTokens: number,
+  onDelta?: (text: string) => void
 ): Promise<ToolLoopResult> {
   const conversation = [...messages];
   let usedTools = false;
-  let reply = await chatCompletion(conversation, { tools: TOOLS, maxTokens });
+  let reply = await chatCompletion(conversation, { tools: TOOLS, maxTokens, onDelta });
 
   for (let round = 0; round < MAX_TOOL_ROUNDS && reply.toolCalls.length > 0; round++) {
     usedTools = true;
@@ -278,7 +279,7 @@ async function runToolLoop(
       });
     }
 
-    reply = await chatCompletion(conversation, { tools: TOOLS, maxTokens });
+    reply = await chatCompletion(conversation, { tools: TOOLS, maxTokens, onDelta });
   }
 
   return { reply, usedTools };
@@ -358,7 +359,8 @@ async function loadHistory(userId: string, conversationId: string): Promise<Agen
 export async function sendMessage(
   userId: string,
   conversationId: string | null,
-  text: string
+  text: string,
+  onDelta?: (fragment: string) => void
 ): Promise<AgentTurn> {
   if (!agentEnabled()) {
     throw new AgentUnavailableError("No Pollinations API key is configured.", false, 0);
@@ -415,7 +417,21 @@ export async function sendMessage(
 
   if (sideEffect) {
     // Side-effecting turns bypass both cache tiers entirely.
-    reply = (await runToolLoop(trimmed, ctx, entitlement.outputTokens)).reply;
+    reply = (await runToolLoop(trimmed, ctx, entitlement.outputTokens, onDelta)).reply;
+  } else if (onDelta) {
+    // A streamed answer is not cacheable: the reader has already seen the
+    // text, and replaying a cached answer would contradict it. The cache is
+    // still worth filling for the next identical question.
+    const result = await getOrFill(
+      cacheKey,
+      PRIMARY_MODEL,
+      async () => (await runToolLoop(trimmed, ctx, entitlement.outputTokens)).reply.text,
+      { ttlMs: CACHE_TTL_MS, scope: "assistant" }
+    );
+    cacheHit = result.hit;
+    reply = { text: result.value, model: PRIMARY_MODEL, toolCalls: [], usage: emptyUsage(), finishReason: "stop" };
+    // The cache filled the answer; say it out loud now, in one piece.
+    onDelta(result.value);
   } else {
     const result = await getOrFill(
       cacheKey,

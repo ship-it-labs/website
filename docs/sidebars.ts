@@ -11,7 +11,7 @@ const sidebars: SidebarsConfig = {
       type: "category",
       label: "Connect",
       collapsed: false,
-      items: ["connect", "mcp", "opencode"],
+      items: ["connect", "mcp"],
     },
     {
       type: "category",

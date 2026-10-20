@@ -393,7 +393,7 @@ function GrantsSection() {
     >
       <SectionError message={failure} />
       {grants.length === 0 ? (
-        <EmptyState>No apps connected. Authorize OpenCode to see it here.</EmptyState>
+        <EmptyState>No apps connected. Authorize your AI assistant to see it here.</EmptyState>
       ) : (
         <>
           <ul className="divide-y divide-white/[0.06]">

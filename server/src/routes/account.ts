@@ -352,7 +352,7 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
         orderBy: "created_at",
         ascending: false,
         page,
-        applyFilters: (q) => q.eq("user_id", userId).like("name", "OpenCode (%"),
+        applyFilters: (q) => q.eq("user_id", userId).like("name", "MCP (%"),
       });
       items = res.items;
       total = res.total;
@@ -383,7 +383,7 @@ export async function accountSettingsRoutes(app: FastifyInstance): Promise<void>
       .single();
 
     const row = (target ?? null) as { id: string; name: string } | null;
-    if (!row || !row.name.startsWith("OpenCode (")) {
+    if (!row || !row.name.startsWith("MCP (")) {
       return reply.status(404).send({
         error: { code: "NOT_FOUND", message: "Connected app not found" },
       });

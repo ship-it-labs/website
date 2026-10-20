@@ -92,8 +92,8 @@ export async function projectRoutes(app: FastifyInstance): Promise<void> {
   });
 
   app.get("/projects", { preHandler: requireScope("projects:read") }, async (req, reply) => {
-    // Paginated, but the `projects` key stays: the OpenCode plugin reads it,
-    // and the plugin contract is frozen. New clients also get total/page/limit.
+    // Paginated, but the `projects` key stays: it is the contract every
+    // client reads, and it is frozen. New clients also get total/page/limit.
     const page = parsePageParams(req.query);
     const userId = req.auth!.userId;
     try {

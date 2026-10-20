@@ -31,7 +31,7 @@ const FEATURES = [
 ];
 
 const STEPS = [
-  { n: "01", title: "Install the plugin", body: "One npm package and an account key in opencode.json." },
+  { n: "01", title: "Connect your assistant", body: "One MCP server. Paste the snippet for your client, and your agent signs itself in." },
   { n: "02", title: "Ask for what you want", body: "Describe the app. The AI uploads your project and builds it in GitHub Actions." },
   { n: "03", title: "Get a live URL", body: "The artifact starts in a sandbox on the least loaded agent, with logs and metrics on demand." },
 ];
@@ -95,7 +95,7 @@ export function HomePage() {
               ) : (
                 <GlowCta to="/signup">Start building free</GlowCta>
               )}
-              <GhostCta to="/docs">Read the docs</GhostCta>
+              <GhostCta href="/docs/">Read the docs</GhostCta>
             </div>
 
             <div

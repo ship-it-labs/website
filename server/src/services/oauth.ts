@@ -11,19 +11,18 @@ import {
 } from "./mcp-login.js";
 
 /**
- * OAuth 2.0 authorization-code flow with PKCE, for the first-party OpenCode
- * plugin. There is no third-party client registration: the only client is the
- * plugin itself, and redirect targets are restricted to loopback so an
- * authorization code can only ever land on the user's own machine.
+ * OAuth 2.0 authorization-code flow with PKCE, for the MCP server.
+ *
+ * There is no third-party client registration: the only client is the MCP
+ * server, and its redirect target is the callback this platform issued for a
+ * login session — never a URL the caller chose. A code can therefore only
+ * ever land back here, and only the server holds the PKCE proof.
  *
  * The issued access token is a regular account API key (same generator, same
  * storage, same verification, same revocation). OAuth is the *issuance*
- * ceremony; everything downstream is unchanged, which is why the api_keys
- * table and its middleware stay live while manual key management is retired.
+ * ceremony; everything downstream is unchanged.
  */
 
-export const OAUTH_CLIENT_ID = "opencode";
-export const OAUTH_APP_NAME = "OpenCode";
 const CODE_TTL_MS = 10 * 60_000;
 export class OAuthError extends Error {
   readonly code: string;
@@ -32,35 +31,6 @@ export class OAuthError extends Error {
     this.name = "OAuthError";
     this.code = code;
   }
-}
-
-/** Loopback-only redirect validation. Anything else is an exfiltration attempt. */
-export function validateRedirectUri(raw: unknown): string {
-  if (typeof raw !== "string" || raw.length === 0 || raw.length > 2048) {
-    throw new OAuthError("INVALID_REDIRECT", "redirect_uri is required");
-  }
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    throw new OAuthError("INVALID_REDIRECT", "redirect_uri is not a URL");
-  }
-  if (url.protocol !== "http:" && url.protocol !== "https:") {
-    throw new OAuthError("INVALID_REDIRECT", "redirect_uri must be http(s)");
-  }
-  if (url.username !== "" || url.password !== "") {
-    throw new OAuthError("INVALID_REDIRECT", "redirect_uri must not embed credentials");
-  }
-  const host = url.hostname.toLowerCase();
-  if (host !== "localhost" && host !== "127.0.0.1" && host !== "[::1]") {
-    throw new OAuthError(
-      "INVALID_REDIRECT",
-      "redirect_uri must point at this machine (localhost)"
-    );
-  }
-  url.hash = "";
-  url.search = "";
-  return url.toString();
 }
 
 /**
@@ -81,11 +51,7 @@ export function validateMcpRedirect(raw: unknown, state: unknown): string {
 }
 
 export function validateClientId(clientId: unknown): void {
-  // Two first-party clients: the (deprecated but working) OpenCode plugin,
-  // which runs on the user's machine and therefore uses a loopback redirect,
-  // and the MCP server, which lives on the platform and uses the callback
-  // this server issued for the login session.
-  if (clientId !== OAUTH_CLIENT_ID && clientId !== MCP_OAUTH_CLIENT_ID) {
+  if (clientId !== MCP_OAUTH_CLIENT_ID) {
     throw new OAuthError("INVALID_CLIENT", "Unknown OAuth client");
   }
 }
@@ -132,13 +98,9 @@ export async function createAuthCode(
   nowMs: number = Date.now()
 ): Promise<{ code: string }> {
   validateClientId(input.clientId);
-  if (input.clientId === MCP_OAUTH_CLIENT_ID) {
-    // The MCP server cannot receive a loopback callback, so it uses one this
-    // server issued for a live login session.
-    validateMcpRedirect(input.redirectUri, input.state);
-  } else {
-    validateRedirectUri(input.redirectUri);
-  }
+  // The only client is the MCP server, whose redirect target is the callback
+  // this server issued for a live login session.
+  validateMcpRedirect(input.redirectUri, input.state);
   validateState(input.state);
   if (typeof input.codeChallenge !== "string" || input.codeChallenge.length === 0) {
     throw new OAuthError("INVALID_REQUEST", "code_challenge is required");
@@ -230,14 +192,12 @@ export async function exchangeCode(
   verifyPkce(input.codeVerifier, row.code_challenge);
 
   const { key, hash, prefix } = generateApiKey();
-  const keyName =
-    row.client_id === MCP_OAUTH_CLIENT_ID ? "MCP (OAuth)" : "OpenCode (OAuth)";
   const { error: keyError } = await db.from("api_keys").insert({
     id: randomUUID(),
     user_id: row.user_id,
     key_hash: hash,
     key_prefix: prefix,
-    name: keyName,
+    name: "MCP (OAuth)",
     is_active: true,
   });
   if (keyError) {

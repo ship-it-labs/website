@@ -7,7 +7,7 @@
  * checkboxes, not a permission matrix.
  *
  * A key with no scopes recorded has all of them. That is what makes the
- * existing OAuth-issued keys (the OpenCode plugin, the MCP login) keep
+ * existing OAuth-issued keys (the MCP login) keep
  * working untouched: they were minted before this table existed.
  */
 

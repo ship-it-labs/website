@@ -13,7 +13,6 @@ import {
 } from "@/components/site/DashboardLayout";
 import { BuildLogViewer } from "@/components/site/BuildLogViewer";
 import { RuntimeDetail } from "@/components/site/RuntimeDetail";
-import { PluginPopup } from "@/components/site/PluginPopup";
 import {
   LeaseCountdown,
   useNow,
@@ -96,23 +95,6 @@ export function DashboardPage() {
   const [confirmDeleteBuild, setConfirmDeleteBuild] = useState<string | null>(null);
   const [copied, setCopied] = useState<string | null>(null);
   const now = useNow();
-
-  const welcome = new URLSearchParams(window.location.search).has("welcome");
-  // First-signup connect walkthrough. Shown once: without the plugin the
-  // account cannot do anything, and localStorage (not the server) remembers
-  // the dismissal because it is pure UI state.
-  const [showPluginPopup, setShowPluginPopup] = useState(
-    () => welcome && localStorage.getItem("shipit.seen_plugin_popup") !== "1"
-  );
-
-  const dismissPluginPopup = () => {
-    try {
-      localStorage.setItem("shipit.seen_plugin_popup", "1");
-    } catch {
-      // Private mode: the popup simply returns next visit.
-    }
-    setShowPluginPopup(false);
-  };
 
   const load = useCallback(async () => {
     try {
@@ -265,12 +247,15 @@ export function DashboardPage() {
     }
   };
 
+  // The signup landing says a little more than the everyday overview.
+  const welcome = new URLSearchParams(window.location.search).has("welcome");
+
   return (
     <DashboardLayout
       title={welcome ? "Welcome aboard" : "Overview"}
       subtitle={
         welcome
-          ? "Your account is ready. Create an API key, then let the agent build and run something."
+          ? "Your account is ready. Connect your AI assistant, then let it build and run something."
           : "Runtime usage, active sessions and recent builds."
       }
     >
@@ -339,7 +324,7 @@ export function DashboardPage() {
               </p>
               <div className="mt-4 flex items-center justify-center gap-3">
                 <a
-                  href="/docs"
+                  href="/docs/"
                   className="rounded-lg bg-white px-4 py-2 text-sm font-medium text-zinc-950 transition-transform duration-200 hover:scale-[1.02]"
                 >
                   Read the docs
@@ -615,8 +600,6 @@ export function DashboardPage() {
           onClose={() => setOpenBuild(null)}
         />
       )}
-
-      {showPluginPopup && <PluginPopup onClose={dismissPluginPopup} />}
 
       {openRuntime && (
         <RuntimeDetail

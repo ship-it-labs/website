@@ -1,16 +1,43 @@
 /**
- * The manual borrows the site's own colours so the docs feel like part of the
- * product rather than a separate website bolted on.
+ * The manual borrows the site's own colours, fonts and surfaces so the docs
+ * feel like part of the product rather than a separate website bolted on.
+ *
+ * The site is dark by design (zinc-950 background, violet accent, Inter for
+ * text and Instrument Serif for display), so the manual follows it exactly
+ * and only offers a light mode for people who ask for one.
  */
+
 :root {
-  --ifm-color-primary: #8b5cf6;
-  --ifm-color-primary-dark: #7c3aed;
-  --ifm-color-primary-darker: #6d28d9;
-  --ifm-color-primary-darkest: #4c1d95;
-  --ifm-color-primary-light: #a78bfa;
-  --ifm-color-primary-lighter: #b794f6;
-  --ifm-color-primary-lightest: #ddd6fe;
+  --ifm-color-primary: #a78bfa;
+  --ifm-color-primary-dark: #8b5cf6;
+  --ifm-color-primary-darker: #7c3aed;
+  --ifm-color-primary-darkest: #6d28d9;
+  --ifm-color-primary-light: #c4b5fd;
+  --ifm-color-primary-lighter: #ddd6fe;
+  --ifm-color-primary-lightest: #f5f3ff;
+
+  --ifm-font-family-base: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --ifm-font-family-monospace: ui-monospace, SFMono-Regular, Menlo, monospace;
+  --ifm-heading-font-family: "Instrument Serif", Georgia, "Times New Roman", serif;
   --ifm-code-font-size: 92%;
+  --ifm-navbar-height: 3.75rem;
+  --ifm-font-size-base: 16px;
+
+  --ifm-background-color: #09090b;
+  --ifm-background-surface-color: #18181b;
+  --docusaurus-highlighted-code-line-bg: rgba(139, 92, 246, 0.12);
+}
+
+[data-theme="light"] {
+  --ifm-color-primary: #7c3aed;
+  --ifm-color-primary-dark: #6d28d9;
+  --ifm-color-primary-darker: #5b21b6;
+  --ifm-color-primary-darkest: #4c1d95;
+  --ifm-color-primary-light: #8b5cf6;
+  --ifm-color-primary-lighter: #a78bfa;
+  --ifm-color-primary-lightest: #ddd6fe;
+  --ifm-background-color: #ffffff;
+  --ifm-background-surface-color: #fafafa;
 }
 
 [data-theme="dark"] {
@@ -23,14 +50,122 @@
   --ifm-color-primary-lightest: #f5f3ff;
   --ifm-background-color: #09090b;
   --ifm-background-surface-color: #18181b;
+  --ifm-navbar-background-color: rgba(9, 9, 11, 0.8);
+  --ifm-footer-background-color: #09090b;
+  --ifm-toc-border-color: rgba(255, 255, 255, 0.08);
+  --ifm-hr-border-color: rgba(255, 255, 255, 0.08);
+  --ifm-menu-color: #d4d4d8;
+  --ifm-menu-color-active: #ffffff;
+  --ifm-navbar-link-color: #a1a1aa;
+  --ifm-navbar-link-hover-color: #ffffff;
+  --ifm-footer-link-color: #a1a1aa;
+  --ifm-footer-title-color: #ffffff;
+  --ifm-code-background: rgba(255, 255, 255, 0.04);
+  --ifm-font-color-base: #d4d4d8;
+  --ifm-heading-color: #ffffff;
 }
 
-.markdown h1 {
-  font-weight: 700;
+/* The site's own surfaces: a soft border and a barely-there fill, the way
+   the glass panels read there. */
+[data-theme="dark"] .card,
+[data-theme="dark"] .menu__link,
+[data-theme="dark"] .pagination,
+[data-theme="dark"] .theme-doc-sidebar-container {
+  background-color: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+[data-theme="dark"] .navbar {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(12px);
+}
+
+[data-theme="dark"] .footer {
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+}
+
+.markdown h1,
+.markdown h2 {
+  font-family: "Instrument Serif", Georgia, "Times New Roman", serif;
   letter-spacing: -0.02em;
+  color: #ffffff;
+}
+
+.markdown h3,
+.markdown h4 {
+  color: #ffffff;
+  letter-spacing: -0.01em;
+}
+
+.markdown p,
+.markdown li {
+  color: #a1a1aa;
+  line-height: 1.75;
+}
+
+.markdown strong {
+  color: #e4e4e7;
 }
 
 .markdown table {
   display: table;
   width: 100%;
+  border-collapse: collapse;
+}
+
+.markdown table th {
+  color: #e4e4e7;
+  font-weight: 500;
+  text-align: left;
+}
+
+.markdown table td,
+.markdown table th {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+  padding: 0.6rem 0.75rem;
+}
+
+.markdown code {
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 0.35rem;
+  color: #ddd6fe;
+}
+
+.markdown pre {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.4);
+  border-radius: 0.75rem;
+}
+
+.markdown pre code {
+  background: transparent;
+  border: none;
+  color: #e4e4e7;
+}
+
+.markdown blockquote {
+  border-left: 2px solid #8b5cf6;
+  color: #a1a1aa;
+}
+
+.markdown hr {
+  border-color: rgba(255, 255, 255, 0.08);
+}
+
+/* The theme's own table of contents and sidebar read better with the site's
+   greys than with the theme's defaults. */
+[data-theme="dark"] .table-of-contents__link,
+[data-theme="dark"] .menu__link {
+  color: #71717a;
+}
+
+[data-theme="dark"] .table-of-contents__link:hover,
+[data-theme="dark"] .menu__link:hover {
+  color: #e4e4e7;
+}
+
+[data-theme="dark"] .table-of-contents__link--active,
+[data-theme="dark"] .menu__link--active {
+  color: #ffffff;
 }

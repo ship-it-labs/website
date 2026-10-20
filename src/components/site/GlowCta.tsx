@@ -47,28 +47,42 @@ export function GlowCta({ to, children, className }: GlowCtaProps) {
 }
 
 interface GhostCtaProps {
-  to: string;
+  /** A route inside the app. */
+  to?: string;
+  /** A plain URL, for pages served outside the app (the manual). */
+  href?: string;
   children: React.ReactNode;
 }
 
-export function GhostCta({ to, children }: GhostCtaProps) {
-  return (
-    <Link
-      to={to}
-      className="group inline-flex items-center gap-2 rounded-full px-6 py-3.5 text-[15px] font-medium text-zinc-300 transition-all duration-200 hover:scale-[1.02] hover:bg-white/5 hover:text-white active:scale-[0.99]"
+export function GhostCta({ to, href, children }: GhostCtaProps) {
+  const className =
+    "group inline-flex items-center gap-2 rounded-full px-6 py-3.5 text-[15px] font-medium text-zinc-300 transition-all duration-200 hover:scale-[1.02] hover:bg-white/5 hover:text-white active:scale-[0.99]";
+  const arrow = (
+    <svg
+      viewBox="0 0 24 24"
+      className="h-4 w-4 transition-transform duration-300 group-hover:translate-x-0.5"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
     >
+      <path d="M5 12h14M13 6l6 6-6 6" />
+    </svg>
+  );
+
+  if (href) {
+    return (
+      <a href={href} className={className}>
+        {children}
+        {arrow}
+      </a>
+    );
+  }
+  return (
+    <Link to={to ?? "/"} className={className}>
       {children}
-      <svg
-        viewBox="0 0 24 24"
-        className="h-4 w-4 transition-transform duration-300 group-hover:translate-x-0.5"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      >
-        <path d="M5 12h14M13 6l6 6-6 6" />
-      </svg>
+      {arrow}
     </Link>
   );
 }

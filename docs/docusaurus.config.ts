@@ -40,6 +40,14 @@ const config: Config = {
     ],
   ],
   themeConfig: {
+    // The site's own typefaces: Inter for text, Instrument Serif for
+    // display. The manual should not look like a different product.
+    stylesheets: [
+      {
+        href: "https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600;700&display=swap",
+        type: "text/css",
+      },
+    ],
     colorMode: {
       defaultMode: "dark",
       respectPrefersColorScheme: true,
@@ -67,7 +75,6 @@ const config: Config = {
           items: [
             { label: "Your AI assistant", to: "/docs/connect" },
             { label: "MCP server", to: "/docs/mcp" },
-            { label: "OpenCode (deprecated)", to: "/docs/opencode" },
           ],
         },
       ],
